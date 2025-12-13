@@ -23,10 +23,11 @@ TIMEFRAME = "15m"
 
 # Lista de ALTCOINS (por base); el símbolo exacto de futuros lo detectamos en runtime
 BASE_TICKERS = [
-    "XRP", "ADA", "DOGE", "AVAX", "INJ",
-    "NEAR", "DOT", "LINK", "LTC", "BCH",
-    "ARB", "OP", "SUI", "WLD", "FIL",
-    "TRX", "HBAR", "SHIB", "XLM", "ZEC",
+    "DOGE", "SHIB", "XLM", "TRX", "HBAR",
+    "OPUL", "ZIL", "ACH", "XEC", "CELR",
+    "LOOM", "BEL", "BLZ", "KEY", "C98",
+    "ASTR", "EDU", "HIGH", "REN", "PSG",
+    "ATM", "WOO",
 ]
 
 # Fichero para guardar el estado por símbolo real de futures (ej. "XRP/USDT:USDT")
