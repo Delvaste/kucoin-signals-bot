@@ -9,6 +9,10 @@ import os
 from flask import Flask
 import threading
 
+import pandas as pd
+import numpy as np
+import talib
+
 # =======================
 # CONFIGURACIÓN
 # =======================
@@ -120,79 +124,124 @@ def atr(ohlcv, period=ATR_PERIOD):
 
 
 # ==================================
-# FUNCIÓN DE SEÑALES (SIN CAMBIOS)
+# FUNCIÓN DE SEÑALES (ESTRATEGIA AVANZADA - SWAP)
+# La lógica interna fue reemplazada por una versión simplificada de la estrategia
+# de scoring (puntuación) del bot externo.
 # ==================================
 
-def generar_senal(ohlcv):
+# --- PARÁMETROS DE LA NUEVA ESTRATEGIA (Ajustables) ---
+MIN_SCORE_FOR_ENTRY = 70
+# -----------------------------------------------------
+
+def generar_senal(ohlcv: list, last_signal: str) -> dict:
     """
-    Estrategia: cruce EMA 9/21 + filtro EMA 100 + SL/TP por ATR.
+    Genera la señal de trading basada en EMA, MACD y RSI con un sistema de scoring (puntuación).
+    También calcula SL/TP basado en el último ATR.
+    ohlcv debe tener al menos 200 velas.
     """
-    if len(ohlcv) < EMA_TENDENCIA_PERIOD + 2:
-        return {
-            "senal": "NO_TRADE",
-            "mensaje": "Datos insuficientes",
-        }
+    if len(ohlcv) < 200:
+        return {"senal": "NO_TRADE", "precio": 0, "stop_loss": 0, "take_profit": 0, "timestamp_candle": 0}
 
-    closes = [c[4] for c in ohlcv]
+    # 1. Preparar datos
+    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    closes = df['close'].values
+    highs = df['high'].values
+    lows = df['low'].values
+    
+    # Valores de la última vela cerrada (entrada/referencia)
+    last_close = closes[-1]
+    last_timestamp = ohlcv[-1][0] # Último timestamp de cierre
 
-    ema_rapida = ema(closes, EMA_RAPIDA_PERIOD)
-    ema_lenta = ema(closes, EMA_LENTA_PERIOD)
-    ema_tendencia = ema(closes, EMA_TENDENCIA_PERIOD)
-    atr_vals = atr(ohlcv, ATR_PERIOD)
+    # 2. Calcular Indicadores TÉCNICOS
+    ema_20 = talib.EMA(closes, timeperiod=20)
+    ema_50 = talib.EMA(closes, timeperiod=50)
+    ema_200 = talib.EMA(closes, timeperiod=200)
+    
+    macd, macdsignal, macdhist = talib.MACD(closes, fastperiod=12, slowperiod=26, signalperiod=9)
+    rsi = talib.RSI(closes, timeperiod=14)
+    
+    # Calcular ATR para SL/TP (manteniendo la gestión de riesgo original)
+    atr_vals = talib.ATR(highs, lows, closes, timeperiod=14)
+    last_atr = atr_vals[-1]
 
-    try:
-        ema_r_1 = ema_rapida[-2]
-        ema_r_2 = ema_rapida[-3]
-        ema_l_1 = ema_lenta[-2]
-        ema_l_2 = ema_lenta[-3]
-        ema_t_1 = ema_tendencia[-2]
-        atr_1 = atr_vals[-2]
-        precio = closes[-2]
-        ts_ultima_cerrada = ohlcv[-2][0]
-    except IndexError:
-        return {
-            "senal": "NO_TRADE",
-            "mensaje": "Error de indexación en indicadores.",
-        }
+    # Tomar los últimos valores de los indicadores (vela cerrada)
+    last_ema_20 = ema_20[-1]
+    last_ema_50 = ema_50[-1]
+    last_ema_200 = ema_200[-1]
+    last_macd_hist = macdhist[-1]
+    last_rsi = rsi[-1]
+    
+    # 3. Calcular la Puntuación (Scoring) de Señal
+    # Se inicializa el score a 0
+    bullish_score = 0
+    bearish_score = 0
 
+    # --- PUNTUACIÓN LONG (BULLISH) ---
+    # 1. Trend Filter: EMA 50 > EMA 200 (Tendencia alcista)
+    if last_ema_50 > last_ema_200:
+        bullish_score += 20
+        
+    # 2. Entry Price: Cierre > EMA 20 (Por encima del precio medio rápido)
+    if last_close > last_ema_20:
+        bullish_score += 20
+        
+    # 3. Momentum: MACD Histograma > 0 (Momentum positivo)
+    if last_macd_hist > 0:
+        bullish_score += 30
+        
+    # 4. Strength: RSI > 55 (Fuerza alcista)
+    if last_rsi > 55:
+        bullish_score += 30
+        
+    # --- PUNTUACIÓN SHORT (BEARISH) ---
+    # 1. Trend Filter: EMA 50 < EMA 200 (Tendencia bajista)
+    if last_ema_50 < last_ema_200:
+        bearish_score += 20
+        
+    # 2. Entry Price: Cierre < EMA 20 (Por debajo del precio medio rápido)
+    if last_close < last_ema_20:
+        bearish_score += 20
+        
+    # 3. Momentum: MACD Histograma < 0 (Momentum negativo)
+    if last_macd_hist < 0:
+        bearish_score += 30
+        
+    # 4. Strength: RSI < 45 (Fuerza bajista)
+    if last_rsi < 45:
+        bearish_score += 30
+        
+
+    # 4. Generar la Señal Final
     senal = "NO_TRADE"
-    stop_loss = None
-    take_profit = None
-    distancia_sl = atr_1 * ATR_SL_MULT
-
-    cruce_alcista = ema_r_2 < ema_l_2 and ema_r_1 > ema_l_1
-    cruce_bajista = ema_r_2 > ema_l_2 and ema_r_1 < ema_l_1
-
-    # LONG
-    precio_confirmado_long = precio > ema_r_1 and precio > ema_l_1
-    filtro_tendencia_long = precio > ema_t_1
-
-    if cruce_alcista and precio_confirmado_long and filtro_tendencia_long:
+    stop_loss = 0
+    take_profit = 0
+    
+    # La nueva estrategia requiere un score MÍNIMO para entrar
+    if bullish_score >= MIN_SCORE_FOR_ENTRY and bearish_score < MIN_SCORE_FOR_ENTRY:
         senal = "LONG"
-        stop_loss = precio - distancia_sl
-        take_profit = precio + (atr_1 * ATR_TP_MULT)
-
-    # SHORT
-    precio_confirmado_short = precio < ema_r_1 and precio < ema_l_1
-    filtro_tendencia_short = precio < ema_t_1
-
-    if cruce_bajista and precio_confirmado_short and filtro_tendencia_short:
+    elif bearish_score >= MIN_SCORE_FOR_ENTRY and bullish_score < MIN_SCORE_FOR_ENTRY:
         senal = "SHORT"
-        stop_loss = precio + distancia_sl
-        take_profit = precio - (atr_1 * ATR_TP_MULT)
 
+    # 5. Calcular SL/TP basado en ATR (Usando 2x ATR para SL, 4x ATR para TP)
+    if senal != "NO_TRADE":
+        atr_multiplier_sl = 2.0
+        atr_multiplier_tp = 4.0 # Esto es una configuración de riesgo conservadora (Ratio 1:2)
+        
+        if senal == "LONG":
+            stop_loss = last_close - (last_atr * atr_multiplier_sl)
+            take_profit = last_close + (last_atr * atr_multiplier_tp)
+        elif senal == "SHORT":
+            stop_loss = last_close + (last_atr * atr_multiplier_sl)
+            take_profit = last_close - (last_atr * atr_multiplier_tp)
+
+    # Devolver el resultado en el formato esperado
     return {
         "senal": senal,
-        "precio": precio,
-        "ema_rapida": ema_r_1,
-        "ema_lenta": ema_l_1,
-        "ema_tendencia": ema_t_1,
-        "atr": atr_1,
+        "precio": last_close,
         "stop_loss": stop_loss,
         "take_profit": take_profit,
-        "timestamp_candle": ts_ultima_cerrada,
-        "cruce_alcista": cruce_alcista,
-        "cruce_bajista": cruce_bajista,
+        "timestamp_candle": last_timestamp,
+        "debug_score": f"LONG:{bullish_score}, SHORT:{bearish_score}" # DEBUG
     }
 
 
