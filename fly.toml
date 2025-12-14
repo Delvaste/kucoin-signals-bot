@@ -1,1 +1,18 @@
-flyctl launch
+# fly.toml app configuration file generated for bot-kucoin on 2025-12-13T23:36:26+01:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'bot-kucoin'
+primary_region = 'cdg'
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = '8080'
+
+[[vm]]
+  memory = '1gb'
+  cpus = 1
+  memory_mb = 1024
