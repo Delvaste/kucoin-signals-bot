@@ -353,9 +353,9 @@ def guardar_state(state):
 # ==================================
 
 def main_loop():
+    # Carga inicial de estado y conexión
     state = cargar_state()
     exchange = get_exchange()
-
     symbol_map = build_symbol_map(exchange, BASE_TICKERS)
 
     if not symbol_map:
@@ -369,13 +369,26 @@ def main_loop():
                 if not symbol:
                     continue
 
+                # --- INICIALIZACIÓN POR SÍMBOLO ---
+                # 1. Cargar el estado anterior (garantiza que sym_state siempre existe)
+                sym_state = state.get(symbol, {"last_candle_ts": 0, "last_signal": "NO_TRADE"})
+                
+                # 2. Definir last_signal y last_candle_ts (evita 'referenced before assignment')
+                last_signal = sym_state.get("last_signal", "NO_TRADE")
+                last_candle_ts = sym_state.get("last_candle_ts", 0)
+                
+                # Usaremos new_signal para guardar el estado al final
+                new_last_signal = last_signal 
+                new_last_candle_ts = last_candle_ts
+
                 try:
                     print(f"\n--- Procesando {base} ({symbol}) ---")
                     ohlcv = get_ohlcv(exchange, symbol, limit=300)
                     if not ohlcv:
                         print("No se han recibido datos OHLCV para", symbol)
                         continue
-
+                    
+                    # Llamada a generar_senal CORREGIDA: Se pasa el estado anterior
                     info = generar_senal(ohlcv, last_signal)
                     senal = info.get("senal", "NO_TRADE")
                     ts_candle = info.get("timestamp_candle")
@@ -385,16 +398,12 @@ def main_loop():
                     if ts_candle is None:
                         print("No hay timestamp en la señal. Info:", info)
                         continue
-
-                    sym_state = state.get(symbol, {})
-                    last_candle_ts = sym_state.get("last_candle_ts")
-                    last_signal = sym_state.get("last_signal")
-
-                    # ¿Vela nueva?
-                    if last_candle_ts is None or ts_candle > last_candle_ts:
+                    
+                    # --- LÓGICA DE NUEVA VELA ---
+                    if ts_candle > last_candle_ts:
                         print(f"Vela nueva en {symbol}. Señal entrada: {senal}, last_signal: {last_signal}")
-                        last_candle_ts = ts_candle
-
+                        new_last_candle_ts = ts_candle
+                        
                         # 1) SALIDA TRAILING POR CRUCE EMA
                         if last_signal == "LONG" and cruce_bajista:
                             mensaje_salida = (
@@ -406,8 +415,8 @@ def main_loop():
                                 f"EMA21: {info.get('ema_lenta'):.6f}\n"
                             )
                             enviar_mensaje(mensaje_salida)
-                            last_signal = None
-
+                            new_last_signal = "NO_TRADE" # Cierra la posición anterior
+                            
                         elif last_signal == "SHORT" and cruce_alcista:
                             mensaje_salida = (
                                 f"SALIDA SHORT (Trailing EMA)\n"
@@ -418,18 +427,18 @@ def main_loop():
                                 f"EMA21: {info.get('ema_lenta'):.6f}\n"
                             )
                             enviar_mensaje(mensaje_salida)
-                            last_signal = None
+                            new_last_signal = "NO_TRADE" # Cierra la posición anterior
 
-                        # 2) ENTRADA NUEVA (LÓGICA MEJORADA CON DOBLE FILTRO DE PRECIO)
+                        # 2) ENTRADA NUEVA
                         stop_loss = info.get("stop_loss")
                         take_profit = info.get("take_profit")
                         precio_senal = info.get("precio") # Precio de CIERRE de la vela de señal
 
-                        if senal in ("LONG", "SHORT") and stop_loss and take_profit and precio_senal:
+                        if senal in ("LONG", "SHORT") and last_signal != senal and stop_loss and take_profit and precio_senal:
                             es_valido = True
                             precio_entrada_real = precio_senal # valor por defecto
-
-                            # --- FILTRO DE PRECIO MÁXIMO ACEPTABLE (SLIPPAGE + SL) ---
+                            
+                            # --- FILTRO DE PRECIO (SLIPPAGE + SL) ---
                             try:
                                 ticker = exchange.fetch_ticker(symbol)
 
@@ -440,42 +449,34 @@ def main_loop():
                                 if ask is None or bid is None:
                                     raise Exception("Ticker sin ask/bid válidos")
 
-                                # --- 1. Comprobación contra el Stop Loss (señal invalidada) ---
-                                # Si el precio actual ya está en una zona de SL, la señal está muerta
+                                # 1. Comprobación contra el Stop Loss (señal invalidada)
                                 if senal == "LONG" and ask < stop_loss:
                                     print(f"LONG RECHAZADO: Precio actual ({ask:.6f}) ya está por debajo del SL ({stop_loss:.6f}).")
                                     es_valido = False
-
                                 elif senal == "SHORT" and bid > stop_loss:
                                     print(f"SHORT RECHAZADO: Precio actual ({bid:.6f}) ya está por encima del SL ({stop_loss:.6f}).")
                                     es_valido = False
 
-                                # --- 2. Comprobación de slippage sólo si sigue siendo válida ---
+                                # 2. Comprobación de slippage sólo si sigue siendo válida
                                 if es_valido:
                                     if senal == "LONG":
-                                        # Si el precio actual de compra es > X% más alto que el precio de señal
                                         if ask > precio_senal * (1 + MAX_SLIPPAGE_PCT):
                                             print(
                                                 f"LONG RECHAZADO: ask {ask:.6f} muy por encima del precio de señal {precio_senal:.6f} (slippage > {MAX_SLIPPAGE_PCT*100:.1f}%)."
                                             )
                                             es_valido = False
                                         else:
-                                            # Usamos el ask como precio real de entrada
                                             precio_entrada_real = ask
-
                                     elif senal == "SHORT":
-                                        # Si el precio actual de venta es < X% más bajo que el precio de señal
                                         if bid < precio_senal * (1 - MAX_SLIPPAGE_PCT):
                                             print(
                                                 f"SHORT RECHAZADO: bid {bid:.6f} muy por debajo del precio de señal {precio_senal:.6f} (slippage > {MAX_SLIPPAGE_PCT*100:.1f}%)."
                                             )
                                             es_valido = False
                                         else:
-                                            # Usamos el bid como precio real de entrada
                                             precio_entrada_real = bid
-
+                                            
                             except Exception as e_ticker:
-                                # Fallback si CCXT no puede obtener el ticker
                                 print(
                                     f"Error al obtener ticker en tiempo real para slippage: {e_ticker}. "
                                     "Usando precio de cierre de la vela."
@@ -485,44 +486,48 @@ def main_loop():
 
                             # --- Ejecución de la Señal si es Válida ---
                             if es_valido:
-                                if last_signal != senal:
-                                    # Recalculamos el tamaño de la posición con el nuevo precio de entrada más preciso
-                                    tamaño, riesgo = calcular_posicion(precio_entrada_real, stop_loss)
+                                # Recalculamos el tamaño de la posición con el nuevo precio de entrada más preciso
+                                tamaño, riesgo = calcular_posicion(precio_entrada_real, stop_loss)
 
-                                    mensaje_entrada = (
-                                        f"ENTRADA {senal} Futuros KuCoin (x{APALANCAMIENTO_FIJO} sugerido)\n"
-                                        f"Par: {symbol}\n"
-                                        f"Timeframe: {TIMEFRAME}\n\n"
-                                        f"Precio entrada (real ask/bid): {precio_entrada_real:.6f}\n"
-                                        f"Precio de Señal (Cierre Vela): {precio_senal:.6f}\n"
-                                        f"Stop Loss (ATR {ATR_SL_MULT}x): {stop_loss:.6f}\n"
-                                        f"Take Profit (ATR {ATR_TP_MULT}x): {take_profit:.6f}\n\n"
-                                        f"Tamaño teórico sugerido: {tamaño:.6f} unidades\n"
-                                        f"Riesgo teórico ({RIESGO_POR_OPERACION*100:.1f}% de {BALANCE_TEORICO}$): {riesgo:.2f} USDT\n\n"
-                                        f"Nota: Bot educativo. No es recomendación de inversión."
-                                    )
+                                mensaje_entrada = (
+                                    f"ENTRADA {senal} Futuros KuCoin (x{APALANCAMIENTO_FIJO} sugerido)\n"
+                                    f"Par: {symbol}\n"
+                                    f"Timeframe: {TIMEFRAME}\n\n"
+                                    f"Precio entrada (real ask/bid): {precio_entrada_real:.6f}\n"
+                                    f"Precio de Señal (Cierre Vela): {precio_senal:.6f}\n"
+                                    f"Stop Loss (ATR {ATR_SL_MULT}x): {stop_loss:.6f}\n"
+                                    f"Take Profit (ATR {ATR_TP_MULT}x): {take_profit:.6f}\n\n"
+                                    f"Tamaño teórico sugerido: {tamaño:.6f} unidades\n"
+                                    f"Riesgo teórico ({RIESGO_POR_OPERACION*100:.1f}% de {BALANCE_TEORICO}$): {riesgo:.2f} USDT\n\n"
+                                    f"Nota: Bot educativo. No es recomendación de inversión."
+                                )
 
-                                    enviar_mensaje(mensaje_entrada)
-                                    last_signal = senal
-                                else:
-                                    print("Señal igual a la anterior, no se envía nueva entrada.")
+                                enviar_mensaje(mensaje_entrada)
+                                new_last_signal = senal # Se actualiza la señal
                             else:
                                 print("Señal rechazada por slippage/SL.")
                         else:
+                            # La señal era NO_TRADE, o la señal es igual a la anterior y no se sale.
                             print("Sin nueva entrada operable en esta vela.")
-
-                        state[symbol] = {
-                            "last_candle_ts": int(last_candle_ts),
-                            "last_signal": last_signal,
-                        }
+                            if senal == "NO_TRADE":
+                                new_last_signal = "NO_TRADE"
+                                
 
                     else:
                         print(f"Misma vela en {symbol}, esperando cierre...")
+                    
+                    # --- ACTUALIZAR ESTADO DEL SÍMBOLO ---
+                    state[symbol] = {
+                        "last_candle_ts": int(new_last_candle_ts),
+                        "last_signal": new_last_signal,
+                    }
 
                     time.sleep(0.5)
 
                 except Exception as e_sym:
                     print(f"Error procesando {symbol}: {e_sym}")
+                    # Si hay un error, el estado que se guarda es el que se cargó al inicio del loop del símbolo, 
+                    # ya que new_last_signal y new_last_candle_ts no se actualizaron con éxito.
 
             guardar_state(state)
 
