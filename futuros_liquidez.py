@@ -12,6 +12,7 @@ import threading
 import pandas as pd
 import numpy as np
 import talib
+import yaml
 
 # =======================
 # CONFIGURACIÓN
@@ -24,7 +25,23 @@ KUCOIN_API_KEY = os.getenv("KUCOIN_API_KEY")
 KUCOIN_API_SECRET = os.getenv("KUCOIN_API_SECRET")
 KUCOIN_API_PASSPHRASE = os.getenv("KUCOIN_API_PASSPHRASE")
 
-# Timeframe -> 1H (Confirmado)
+CONFIG_PATH = Path("config.yml")
+
+
+def load_config(path: Path = CONFIG_PATH) -> dict:
+    """
+    Carga la configuración desde config.yml si existe.
+    Si no existe, devuelve un dict vacío y se usan los defaults del código.
+    """
+    if not path.exists():
+        return {}
+    with path.open("r", encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
+
+
+CONFIG = load_config()
+
+# Timeframe -> 1H (Confirmado) (valor por defecto, se puede sobreescribir por config.yml)
 TIMEFRAME = "1h"
 
 # Slippage máximo permitido (0.5% = 0.005)
@@ -132,6 +149,29 @@ def atr(ohlcv, period=ATR_PERIOD):
 # --- PARÁMETROS DE LA NUEVA ESTRATEGIA (Ajustables) ---
 MIN_SCORE_FOR_ENTRY = 70
 # -----------------------------------------------------
+
+# ================================
+# OVERRIDE DE PARÁMETROS POR CONFIG
+# ================================
+settings_cfg = CONFIG.get("settings", {})
+markets_cfg = CONFIG.get("markets", {})
+strategy_cfg = CONFIG.get("strategy", {})
+
+# SETTINGS
+TIMEFRAME = settings_cfg.get("timeframe", TIMEFRAME)
+MAX_SLIPPAGE_PCT = settings_cfg.get("max_slippage_pct", MAX_SLIPPAGE_PCT)
+BALANCE_TEORICO = settings_cfg.get("balance_teorico", BALANCE_TEORICO)
+RIESGO_POR_OPERACION = settings_cfg.get("riesgo_por_operacion", RIESGO_POR_OPERACION)
+APALANCAMIENTO_FIJO = settings_cfg.get("apalancamiento", APALANCAMIENTO_FIJO)
+BASE_TICKERS = markets_cfg.get("base_tickers", BASE_TICKERS)
+
+# ESTRATEGIA
+MIN_SCORE_FOR_ENTRY = strategy_cfg.get("min_score_for_entry", MIN_SCORE_FOR_ENTRY)
+ATR_SL_MULT = strategy_cfg.get("atr_sl_mult", ATR_SL_MULT)
+ATR_TP_MULT = strategy_cfg.get("atr_tp_mult", ATR_TP_MULT)
+
+# Intervalo general entre ciclos sobre todos los símbolos (segundos)
+UPDATE_INTERVAL = settings_cfg.get("update_interval", 30)
 
 def generar_senal(ohlcv: list, last_signal: str) -> dict:
     """
@@ -535,7 +575,7 @@ def main_loop():
             print(f"Error en loop principal: {e}")
 
         # Espera general entre ciclos sobre todos los símbolos
-        time.sleep(30)
+        time.sleep(UPDATE_INTERVAL)
 
 
 # ==================================
