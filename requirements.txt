@@ -1,3 +1,6 @@
 ccxt
 requests
 flask
+pandas
+numpy
+ta-lib
