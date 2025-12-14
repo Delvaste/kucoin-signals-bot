@@ -1,0 +1,44 @@
+settings:
+  timeframe: "1h"          # mismo valor que ahora
+  update_interval: 30      # segundos entre ciclos del bot
+  max_slippage_pct: 0.005  # 0.5% de slippage máximo
+  balance_teorico: 50.0
+  riesgo_por_operacion: 0.05   # 5%
+  apalancamiento: 10
+
+markets:
+  base_tickers:
+    - XRP
+    - ADA
+    - NEAR
+    - WLD
+    - FIL
+    - ARB
+    - OP
+    - SUI
+    - SEI
+    - DOGE
+    - TRX
+    - XLM
+    - FTM
+    - TIA
+    - MINA
+    - MANA
+    - SAND
+    - GALA
+    - CHZ
+    - SHIB
+    - FLOKI
+    - LDO
+    - WIF
+    - PEPE
+    - HBAR
+
+strategy:
+  min_score_for_entry: 70   # mismo umbral que tienes ahora
+  atr_sl_mult: 1.5          # SL = 1.5 * ATR
+  atr_tp_mult: 3.0          # TP = 3.0 * ATR
+
+notifications:
+  telegram:
+    enabled: true
