@@ -25,9 +25,9 @@ TIMEFRAME = "15m"
 BASE_TICKERS = [
     "XRP", "ADA", "LINK", "NEAR", "WLD",
     "FIL", "ARB", "OP", "SUI", "SEI",
-    "DOGE", "MANA", "SAND", "GALA", "CHZ",
-    "SUI", "TRX", "XLM", "FTM", "TIA",
-    "MINA", "MANA", "SAND", "SHIB", "FLOKI",
+    "DOGE", "TRX", "XLM", "FTM", "TIA",
+    "MINA", "MANA", "SAND", "GALA", "CHZ",
+    "SHIB", "FLOKI"
 ]
 
 # Fichero para guardar el estado por símbolo real de futures (ej. "XRP/USDT:USDT")
