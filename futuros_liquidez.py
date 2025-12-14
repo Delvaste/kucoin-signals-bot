@@ -376,7 +376,7 @@ def main_loop():
                         print("No se han recibido datos OHLCV para", symbol)
                         continue
 
-                    info = generar_senal(ohlcv)
+                    info = generar_senal(ohlcv, last_signal)
                     senal = info.get("senal", "NO_TRADE")
                     ts_candle = info.get("timestamp_candle")
                     cruce_alcista = info.get("cruce_alcista", False)
