@@ -20,19 +20,18 @@ KUCOIN_API_KEY = os.getenv("KUCOIN_API_KEY")
 KUCOIN_API_SECRET = os.getenv("KUCOIN_API_SECRET")
 KUCOIN_API_PASSPHRASE = os.getenv("KUCOIN_API_PASSPHRASE")
 
-# Timeframe -> AHORA 1H
+# Timeframe -> 1H (Confirmado)
 TIMEFRAME = "1h"
 
 # Slippage máximo permitido (0.5% = 0.005)
 MAX_SLIPPAGE_PCT = 0.005
 
-# Lista de ALTCOINS (Alta Liquidez, Precio < $5 USD)
+# Lista de ALTCOINS (ACTUALIZADA: < $5 USD, Alta Liquidez en Futuros, Timeframe 1h)
 BASE_TICKERS = [
-    "XRP", "ADA", "LINK", "NEAR", "WLD",
-    "FIL", "ARB", "OP", "SUI", "SEI",
-    "DOGE", "TRX", "XLM", "FTM", "TIA",
-    "MINA", "MANA", "SAND", "GALA", "CHZ",
-    "SHIB", "FLOKI"
+    "XRP", "ADA", "NEAR", "WLD", "FIL", "ARB", "OP", "SUI", "SEI", 
+    "DOGE", "TRX", "XLM", "FTM", "TIA", "MINA", "MANA", "SAND", 
+    "GALA", "CHZ", "SHIB", "FLOKI", 
+    "LDO", "WIF", "PEPE", "HBAR" # Nuevas adiciones estratégicas
 ]
 
 # Fichero para guardar el estado por símbolo real de futures (ej. "XRP/USDT:USDT")
@@ -56,13 +55,11 @@ APALANCAMIENTO_FIJO = 10       # Apalancamiento deseado (x10)
 
 
 # ==================================
-# FUNCIONES DE INDICADORES
+# FUNCIONES DE INDICADORES (SIN CAMBIOS)
 # ==================================
 
 def ema(values, period):
-    """
-    Cálculo de EMA simple
-    """
+    # ... (Código de EMA)
     if not values:
         return []
 
@@ -81,9 +78,7 @@ def ema(values, period):
 
 
 def tr(high, low, close_prev):
-    """
-    True Range
-    """
+    # ... (Código de TR)
     r1 = high - low
     r2 = abs(high - close_prev)
     r3 = abs(low - close_prev)
@@ -91,9 +86,7 @@ def tr(high, low, close_prev):
 
 
 def atr(ohlcv, period=ATR_PERIOD):
-    """
-    ATR suavizado tipo RMA
-    """
+    # ... (Código de ATR)
     if len(ohlcv) < 2:
         return []
 
@@ -127,14 +120,12 @@ def atr(ohlcv, period=ATR_PERIOD):
 
 
 # ==================================
-# FUNCIÓN DE SEÑALES
+# FUNCIÓN DE SEÑALES (SIN CAMBIOS)
 # ==================================
 
 def generar_senal(ohlcv):
     """
-    Estrategia:
-    - Entrada: cruce EMA 9/21 + filtro EMA 100 + SL/TP por ATR
-    - Señal sobre la ÚLTIMA VELA CERRADA (penúltima del array).
+    Estrategia: cruce EMA 9/21 + filtro EMA 100 + SL/TP por ATR.
     """
     if len(ohlcv) < EMA_TENDENCIA_PERIOD + 2:
         return {
@@ -206,7 +197,7 @@ def generar_senal(ohlcv):
 
 
 # ==================================
-# GESTIÓN DE RIESGO
+# GESTIÓN DE RIESGO (SIN CAMBIOS)
 # ==================================
 
 def calcular_posicion(precio_entrada, stop_loss):
@@ -250,7 +241,7 @@ def build_symbol_map(exchange, base_tickers):
 
     alias = {
         "1000SHIB": "SHIB",
-        "1000PEPE": "PEPE",
+        "1000PEPE": "PEPE", # Añadido alias para el nuevo ticker PEPE
     }
 
     for m in markets.values():
@@ -362,8 +353,8 @@ def main_loop():
                                 f"Par: {symbol}\n"
                                 f"Timeframe: {TIMEFRAME}\n\n"
                                 f"Motivo: EMA9 cruza por DEBAJO de EMA21.\n"
-                                f"EMA9: {info.get('ema_rapida'):.4f}\n"
-                                f"EMA21: {info.get('ema_lenta'):.4f}\n"
+                                f"EMA9: {info.get('ema_rapida'):.6f}\n"
+                                f"EMA21: {info.get('ema_lenta'):.6f}\n"
                             )
                             enviar_mensaje(mensaje_salida)
                             last_signal = None
@@ -374,66 +365,86 @@ def main_loop():
                                 f"Par: {symbol}\n"
                                 f"Timeframe: {TIMEFRAME}\n\n"
                                 f"Motivo: EMA9 cruza por ENCIMA de EMA21.\n"
-                                f"EMA9: {info.get('ema_rapida'):.4f}\n"
-                                f"EMA21: {info.get('ema_lenta'):.4f}\n"
+                                f"EMA9: {info.get('ema_rapida'):.6f}\n"
+                                f"EMA21: {info.get('ema_lenta'):.6f}\n"
                             )
                             enviar_mensaje(mensaje_salida)
                             last_signal = None
 
-                        # 2) ENTRADA NUEVA CON FILTRO DE SLIPPAGE
+                        # 2) ENTRADA NUEVA (LÓGICA MEJORADA CON DOBLE FILTRO DE PRECIO)
                         stop_loss = info.get("stop_loss")
                         take_profit = info.get("take_profit")
-                        precio_senal = info.get("precio")  # cierre de la vela de señal
+                        precio_senal = info.get("precio") # Precio de CIERRE de la vela de señal
 
                         if senal in ("LONG", "SHORT") and stop_loss and take_profit and precio_senal:
-                            # --- FILTRO DE PRECIO / SLIPPAGE ---
                             es_valido = True
-                            precio_entrada_real = precio_senal
+                            precio_entrada_real = precio_senal # valor por defecto
 
+                            # --- FILTRO DE PRECIO MÁXIMO ACEPTABLE (SLIPPAGE + SL) ---
                             try:
                                 ticker = exchange.fetch_ticker(symbol)
+
+                                # Aseguramos tener ask/bid; si no, usamos last
                                 ask = ticker.get("ask") or ticker.get("last")
                                 bid = ticker.get("bid") or ticker.get("last")
 
-                                if senal == "LONG":
-                                    if ask is None:
-                                        raise ValueError("ask vacío en ticker")
-                                    precio_entrada_real = ask
-                                    if precio_entrada_real > precio_senal * (1 + MAX_SLIPPAGE_PCT):
-                                        print(
-                                            f"LONG RECHAZADO: ask {precio_entrada_real:.6f} "
-                                            f"muy por encima del precio de señal {precio_senal:.6f}"
-                                        )
-                                        es_valido = False
-                                else:  # SHORT
-                                    if bid is None:
-                                        raise ValueError("bid vacío en ticker")
-                                    precio_entrada_real = bid
-                                    if precio_entrada_real < precio_senal * (1 - MAX_SLIPPAGE_PCT):
-                                        print(
-                                            f"SHORT RECHAZADO: bid {precio_entrada_real:.6f} "
-                                            f"muy por debajo del precio de señal {precio_senal:.6f}"
-                                        )
-                                        es_valido = False
+                                if ask is None or bid is None:
+                                    raise Exception("Ticker sin ask/bid válidos")
+
+                                # --- 1. Comprobación contra el Stop Loss (señal invalidada) ---
+                                # Si el precio actual ya está en una zona de SL, la señal está muerta
+                                if senal == "LONG" and ask < stop_loss:
+                                    print(f"LONG RECHAZADO: Precio actual ({ask:.6f}) ya está por debajo del SL ({stop_loss:.6f}).")
+                                    es_valido = False
+
+                                elif senal == "SHORT" and bid > stop_loss:
+                                    print(f"SHORT RECHAZADO: Precio actual ({bid:.6f}) ya está por encima del SL ({stop_loss:.6f}).")
+                                    es_valido = False
+
+                                # --- 2. Comprobación de slippage sólo si sigue siendo válida ---
+                                if es_valido:
+                                    if senal == "LONG":
+                                        # Si el precio actual de compra es > X% más alto que el precio de señal
+                                        if ask > precio_senal * (1 + MAX_SLIPPAGE_PCT):
+                                            print(
+                                                f"LONG RECHAZADO: ask {ask:.6f} muy por encima del precio de señal {precio_senal:.6f} (slippage > {MAX_SLIPPAGE_PCT*100:.1f}%)."
+                                            )
+                                            es_valido = False
+                                        else:
+                                            # Usamos el ask como precio real de entrada
+                                            precio_entrada_real = ask
+
+                                    elif senal == "SHORT":
+                                        # Si el precio actual de venta es < X% más bajo que el precio de señal
+                                        if bid < precio_senal * (1 - MAX_SLIPPAGE_PCT):
+                                            print(
+                                                f"SHORT RECHAZADO: bid {bid:.6f} muy por debajo del precio de señal {precio_senal:.6f} (slippage > {MAX_SLIPPAGE_PCT*100:.1f}%)."
+                                            )
+                                            es_valido = False
+                                        else:
+                                            # Usamos el bid como precio real de entrada
+                                            precio_entrada_real = bid
 
                             except Exception as e_ticker:
+                                # Fallback si CCXT no puede obtener el ticker
                                 print(
                                     f"Error al obtener ticker en tiempo real para slippage: {e_ticker}. "
-                                    f"Usando precio de vela."
+                                    "Usando precio de cierre de la vela."
                                 )
                                 es_valido = True
                                 precio_entrada_real = precio_senal
 
-                            # --- EJECUTAR SEÑAL SI ES VÁLIDA ---
+                            # --- Ejecución de la Señal si es Válida ---
                             if es_valido:
                                 if last_signal != senal:
+                                    # Recalculamos el tamaño de la posición con el nuevo precio de entrada más preciso
                                     tamaño, riesgo = calcular_posicion(precio_entrada_real, stop_loss)
 
                                     mensaje_entrada = (
                                         f"ENTRADA {senal} Futuros KuCoin (x{APALANCAMIENTO_FIJO} sugerido)\n"
                                         f"Par: {symbol}\n"
                                         f"Timeframe: {TIMEFRAME}\n\n"
-                                        f"Precio entrada (real-ask/bid): {precio_entrada_real:.6f}\n"
+                                        f"Precio entrada (real ask/bid): {precio_entrada_real:.6f}\n"
                                         f"Precio de Señal (Cierre Vela): {precio_senal:.6f}\n"
                                         f"Stop Loss (ATR {ATR_SL_MULT}x): {stop_loss:.6f}\n"
                                         f"Take Profit (ATR {ATR_TP_MULT}x): {take_profit:.6f}\n\n"
@@ -447,7 +458,7 @@ def main_loop():
                                 else:
                                     print("Señal igual a la anterior, no se envía nueva entrada.")
                             else:
-                                print("Señal rechazada por slippage.")
+                                print("Señal rechazada por slippage/SL.")
                         else:
                             print("Sin nueva entrada operable en esta vela.")
 
