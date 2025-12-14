@@ -5,20 +5,26 @@ from pathlib import Path
 import ccxt
 import requests
 
+import os
+from flask import Flask
+import threading
+
 # =======================
 # CONFIGURACIÓN
 # =======================
 
-# --- Variables de Entorno (Se asume que ya están configuradas) ---
-import os
+# --- Variables de Entorno ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 KUCOIN_API_KEY = os.getenv("KUCOIN_API_KEY")
 KUCOIN_API_SECRET = os.getenv("KUCOIN_API_SECRET")
 KUCOIN_API_PASSPHRASE = os.getenv("KUCOIN_API_PASSPHRASE")
 
-# Timeframe
-TIMEFRAME = "15m"
+# Timeframe -> AHORA 1H
+TIMEFRAME = "1h"
+
+# Slippage máximo permitido (0.5% = 0.005)
+MAX_SLIPPAGE_PCT = 0.005
 
 # Lista de ALTCOINS (Alta Liquidez, Precio < $5 USD)
 BASE_TICKERS = [
@@ -34,27 +40,29 @@ STATE_FILE = Path("state_kucoin_signals.json")
 
 
 # ==================================
-# PARÁMETROS DE LA ESTRATEGIA (ACTUALIZADOS)
+# PARÁMETROS DE LA ESTRATEGIA
 # ==================================
 EMA_RAPIDA_PERIOD = 9
 EMA_LENTA_PERIOD = 21
 EMA_TENDENCIA_PERIOD = 100  # Filtro de tendencia
-ATR_PERIOD = 14  
-ATR_SL_MULT = 1.5  
-ATR_TP_MULT = 3.0  
+ATR_PERIOD = 14
+ATR_SL_MULT = 1.5
+ATR_TP_MULT = 3.0
 
-# PARÁMETROS DE GESTIÓN DE CAPITAL (ACTUALIZADOS)
+# PARÁMETROS DE GESTIÓN DE CAPITAL
 BALANCE_TEORICO = 50.0
-RIESGO_POR_OPERACION = 0.05    # 5% de riesgo por operación (ANTES ERA 0.01)
+RIESGO_POR_OPERACION = 0.05    # 5% de riesgo por operación
 APALANCAMIENTO_FIJO = 10       # Apalancamiento deseado (x10)
 
 
 # ==================================
-# FUNCIONES DE INDICADORES (SIN CAMBIOS)
+# FUNCIONES DE INDICADORES
 # ==================================
 
 def ema(values, period):
-    # ... (código de ema sin cambios)
+    """
+    Cálculo de EMA simple
+    """
     if not values:
         return []
 
@@ -73,7 +81,9 @@ def ema(values, period):
 
 
 def tr(high, low, close_prev):
-    # ... (código de tr sin cambios)
+    """
+    True Range
+    """
     r1 = high - low
     r2 = abs(high - close_prev)
     r3 = abs(low - close_prev)
@@ -81,7 +91,9 @@ def tr(high, low, close_prev):
 
 
 def atr(ohlcv, period=ATR_PERIOD):
-    # ... (código de atr sin cambios)
+    """
+    ATR suavizado tipo RMA
+    """
     if len(ohlcv) < 2:
         return []
 
@@ -115,7 +127,7 @@ def atr(ohlcv, period=ATR_PERIOD):
 
 
 # ==================================
-# FUNCIÓN DE SEÑALES (SIN CAMBIOS)
+# FUNCIÓN DE SEÑALES
 # ==================================
 
 def generar_senal(ohlcv):
@@ -194,7 +206,7 @@ def generar_senal(ohlcv):
 
 
 # ==================================
-# GESTIÓN DE RIESGO (ACTUALIZADO)
+# GESTIÓN DE RIESGO
 # ==================================
 
 def calcular_posicion(precio_entrada, stop_loss):
@@ -202,7 +214,7 @@ def calcular_posicion(precio_entrada, stop_loss):
     Calcula el tamaño de la posición basado en un riesgo fijo (5% del balance).
     """
     balance = BALANCE_TEORICO
-    riesgo_dolares = balance * RIESGO_POR_OPERACION # 5% de $50 = $2.50
+    riesgo_dolares = balance * RIESGO_POR_OPERACION  # 5% de $50 = $2.50
 
     if not stop_loss:
         return 0, riesgo_dolares
@@ -211,17 +223,13 @@ def calcular_posicion(precio_entrada, stop_loss):
     if distancia == 0:
         return 0, riesgo_dolares
 
-    # tamaño = Riesgo en USD / Distancia al SL en precio
     tamaño = riesgo_dolares / distancia  # tamaño en unidades del activo
-
     return tamaño, riesgo_dolares
 
 
 # ==================================
-# RESTO DEL LOOP PRINCIPAL (SIN CAMBIOS)
+# EXCHANGE / DATA / TELEGRAM / STATE
 # ==================================
-# ... (Funciones get_exchange, build_symbol_map, get_ohlcv, TELEGRAM, STATE, y main_loop)
-# ... (El código restante del loop principal se mantiene idéntico, ya que la lógica de entrada/salida y estado es correcta)
 
 def get_exchange():
     exchange = ccxt.kucoinfutures({
@@ -242,7 +250,7 @@ def build_symbol_map(exchange, base_tickers):
 
     alias = {
         "1000SHIB": "SHIB",
-        "1000PEPE": "PEPE", # Añadido por seguridad si incluyes más tarde
+        "1000PEPE": "PEPE",
     }
 
     for m in markets.values():
@@ -267,8 +275,7 @@ def build_symbol_map(exchange, base_tickers):
 
 
 def get_ohlcv(exchange, symbol, limit=300):
-    ohlcv = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=limit)
-    return ohlcv
+    return exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=limit)
 
 
 def enviar_mensaje(texto: str):
@@ -300,6 +307,10 @@ def guardar_state(state):
     except Exception as e:
         print(f"No se pudo guardar estado: {e}")
 
+
+# ==================================
+# LOOP PRINCIPAL
+# ==================================
 
 def main_loop():
     state = cargar_state()
@@ -339,11 +350,12 @@ def main_loop():
                     last_candle_ts = sym_state.get("last_candle_ts")
                     last_signal = sym_state.get("last_signal")
 
+                    # ¿Vela nueva?
                     if last_candle_ts is None or ts_candle > last_candle_ts:
                         print(f"Vela nueva en {symbol}. Señal entrada: {senal}, last_signal: {last_signal}")
                         last_candle_ts = ts_candle
 
-                        # 1) TRAILING EXIT POR CRUCE EMA
+                        # 1) SALIDA TRAILING POR CRUCE EMA
                         if last_signal == "LONG" and cruce_bajista:
                             mensaje_salida = (
                                 f"SALIDA LONG (Trailing EMA)\n"
@@ -368,31 +380,74 @@ def main_loop():
                             enviar_mensaje(mensaje_salida)
                             last_signal = None
 
-                        # 2) ENTRADA NUEVA
+                        # 2) ENTRADA NUEVA CON FILTRO DE SLIPPAGE
                         stop_loss = info.get("stop_loss")
                         take_profit = info.get("take_profit")
-                        precio = info.get("precio")
+                        precio_senal = info.get("precio")  # cierre de la vela de señal
 
-                        if senal in ("LONG", "SHORT") and stop_loss and take_profit and precio:
-                            if last_signal != senal:
-                                tamaño, riesgo = calcular_posicion(precio, stop_loss)
+                        if senal in ("LONG", "SHORT") and stop_loss and take_profit and precio_senal:
+                            # --- FILTRO DE PRECIO / SLIPPAGE ---
+                            es_valido = True
+                            precio_entrada_real = precio_senal
 
-                                mensaje_entrada = (
-                                    f"ENTRADA {senal} Futuros KuCoin (x{APALANCAMIENTO_FIJO} sugerido)\n"
-                                    f"Par: {symbol}\n"
-                                    f"Timeframe: {TIMEFRAME}\n\n"
-                                    f"Precio entrada (aprox): {precio:.6f}\n"
-                                    f"Stop Loss (ATR {ATR_SL_MULT}x): {stop_loss:.6f}\n"
-                                    f"Take Profit (ATR {ATR_TP_MULT}x): {take_profit:.6f}\n\n"
-                                    f"Tamaño teórico sugerido: {tamaño:.6f} unidades\n"
-                                    f"Riesgo teórico ({RIESGO_POR_OPERACION*100:.1f}% de {BALANCE_TEORICO}$): {riesgo:.2f} USDT\n\n"
-                                    f"Nota: Bot educativo. No es recomendación de inversión."
+                            try:
+                                ticker = exchange.fetch_ticker(symbol)
+                                ask = ticker.get("ask") or ticker.get("last")
+                                bid = ticker.get("bid") or ticker.get("last")
+
+                                if senal == "LONG":
+                                    if ask is None:
+                                        raise ValueError("ask vacío en ticker")
+                                    precio_entrada_real = ask
+                                    if precio_entrada_real > precio_senal * (1 + MAX_SLIPPAGE_PCT):
+                                        print(
+                                            f"LONG RECHAZADO: ask {precio_entrada_real:.6f} "
+                                            f"muy por encima del precio de señal {precio_senal:.6f}"
+                                        )
+                                        es_valido = False
+                                else:  # SHORT
+                                    if bid is None:
+                                        raise ValueError("bid vacío en ticker")
+                                    precio_entrada_real = bid
+                                    if precio_entrada_real < precio_senal * (1 - MAX_SLIPPAGE_PCT):
+                                        print(
+                                            f"SHORT RECHAZADO: bid {precio_entrada_real:.6f} "
+                                            f"muy por debajo del precio de señal {precio_senal:.6f}"
+                                        )
+                                        es_valido = False
+
+                            except Exception as e_ticker:
+                                print(
+                                    f"Error al obtener ticker en tiempo real para slippage: {e_ticker}. "
+                                    f"Usando precio de vela."
                                 )
+                                es_valido = True
+                                precio_entrada_real = precio_senal
 
-                                enviar_mensaje(mensaje_entrada)
-                                last_signal = senal
+                            # --- EJECUTAR SEÑAL SI ES VÁLIDA ---
+                            if es_valido:
+                                if last_signal != senal:
+                                    tamaño, riesgo = calcular_posicion(precio_entrada_real, stop_loss)
+
+                                    mensaje_entrada = (
+                                        f"ENTRADA {senal} Futuros KuCoin (x{APALANCAMIENTO_FIJO} sugerido)\n"
+                                        f"Par: {symbol}\n"
+                                        f"Timeframe: {TIMEFRAME}\n\n"
+                                        f"Precio entrada (real-ask/bid): {precio_entrada_real:.6f}\n"
+                                        f"Precio de Señal (Cierre Vela): {precio_senal:.6f}\n"
+                                        f"Stop Loss (ATR {ATR_SL_MULT}x): {stop_loss:.6f}\n"
+                                        f"Take Profit (ATR {ATR_TP_MULT}x): {take_profit:.6f}\n\n"
+                                        f"Tamaño teórico sugerido: {tamaño:.6f} unidades\n"
+                                        f"Riesgo teórico ({RIESGO_POR_OPERACION*100:.1f}% de {BALANCE_TEORICO}$): {riesgo:.2f} USDT\n\n"
+                                        f"Nota: Bot educativo. No es recomendación de inversión."
+                                    )
+
+                                    enviar_mensaje(mensaje_entrada)
+                                    last_signal = senal
+                                else:
+                                    print("Señal igual a la anterior, no se envía nueva entrada.")
                             else:
-                                print("Señal igual a la anterior, no se envía nueva entrada.")
+                                print("Señal rechazada por slippage.")
                         else:
                             print("Sin nueva entrada operable en esta vela.")
 
@@ -414,22 +469,27 @@ def main_loop():
         except Exception as e:
             print(f"Error en loop principal: {e}")
 
+        # Espera general entre ciclos sobre todos los símbolos
         time.sleep(30)
 
 
-if __name__ == "__main__":
-    main_loop()
-
-from flask import Flask
-import threading
+# ==================================
+# FLASK PARA HEALTHCHECK EN FLY.IO
+# ==================================
 
 app = Flask(__name__)
 
-@app.route('/')
+@app.route("/")
 def home():
     return "Bot running!", 200
+
 
 def run_flask():
     app.run(host="0.0.0.0", port=8080)
 
-threading.Thread(target=run_flask).start()
+
+if __name__ == "__main__":
+    # Lanzamos Flask en un hilo en segundo plano (para Fly.io)
+    threading.Thread(target=run_flask, daemon=True).start()
+    # Y arrancamos el loop principal del bot
+    main_loop()
