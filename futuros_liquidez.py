@@ -452,8 +452,8 @@ def crear_grafico_24h(symbol: str, ohlcv: list, timeframe: str) -> str:
     """
     Genera un gráfico tipo "trading spot":
     - Velas (últimas NUM_CANDLES_CHART).
-    - EMAs 20 / 50 / 200.
-    - Bandas de Bollinger (20, 2σ).
+    - EMAs 20 / 50 / 200 (si hay datos válidos).
+    - Bandas de Bollinger (20, 2σ) (si hay datos válidos).
     - Volumen en panel inferior.
     Devuelve la ruta al PNG.
     """
@@ -469,8 +469,9 @@ def crear_grafico_24h(symbol: str, ohlcv: list, timeframe: str) -> str:
     # Aseguramos que están ordenadas por timestamp
     df = df.sort_values("timestamp")
 
-    # Nos quedamos solo con las últimas N velas
-    df_tail = df.tail(NUM_CANDLES_CHART).copy()
+    # Nos quedamos solo con las últimas N velas (o las que haya)
+    n = min(NUM_CANDLES_CHART, len(df))
+    df_tail = df.tail(n).copy()
 
     # Convertimos a datetime en UTC y luego a la zona horaria configurada
     dt = pd.to_datetime(df_tail["timestamp"], unit="ms", utc=True)
@@ -486,27 +487,38 @@ def crear_grafico_24h(symbol: str, ohlcv: list, timeframe: str) -> str:
     df_ohlc = df_tail[["open", "high", "low", "close", "volume"]].copy()
     df_ohlc.columns = ["Open", "High", "Low", "Close", "Volume"]
 
+    # Si por cualquier motivo las columnas principales están vacías -> abortar
+    if df_ohlc[["Open", "High", "Low", "Close"]].dropna().empty:
+        raise ValueError("No hay datos OHLC válidos para graficar.")
+
     # Cálculo de indicadores sobre el tramo que vamos a graficar
     closes = df_ohlc["Close"].astype(float).values
 
     if len(closes) < 20:
         raise ValueError("No hay suficientes velas para EMAs/Bollinger (mínimo 20).")
 
-    ema20 = talib.EMA(closes, timeperiod=20)
-    ema50 = talib.EMA(closes, timeperiod=50)
-    ema200 = talib.EMA(closes, timeperiod=200)
+    try:
+        ema20_arr = talib.EMA(closes, timeperiod=20)
+        ema50_arr = talib.EMA(closes, timeperiod=50)
+        ema200_arr = talib.EMA(closes, timeperiod=200)
 
-    upper, middle, lower = talib.BBANDS(
-        closes, timeperiod=20, nbdevup=2, nbdevdn=2, matype=0
-    )
+        upper_arr, middle_arr, lower_arr = talib.BBANDS(
+            closes, timeperiod=20, nbdevup=2, nbdevdn=2, matype=0
+        )
+    except Exception as e_ind:
+        print(f"Error calculando EMAs/Bollinger para {symbol}: {e_ind}")
+        # Si fallan los indicadores, graficamos solo velas + volumen
+        ema20_arr = ema50_arr = ema200_arr = upper_arr = middle_arr = lower_arr = None
 
-    # Añadimos indicadores al DataFrame (mpf acepta NaN sin problema)
-    df_ohlc["EMA20"] = ema20
-    df_ohlc["EMA50"] = ema50
-    df_ohlc["EMA200"] = ema200
-    df_ohlc["BB_up"] = upper
-    df_ohlc["BB_mid"] = middle
-    df_ohlc["BB_low"] = lower
+    # Convertimos a Series alineadas con el índice
+    if ema20_arr is not None:
+        ema20 = pd.Series(ema20_arr, index=df_ohlc.index)
+        ema50 = pd.Series(ema50_arr, index=df_ohlc.index)
+        ema200 = pd.Series(ema200_arr, index=df_ohlc.index)
+        bb_up = pd.Series(upper_arr, index=df_ohlc.index)
+        bb_low = pd.Series(lower_arr, index=df_ohlc.index)
+    else:
+        ema20 = ema50 = ema200 = bb_up = bb_low = None
 
     # Log para ver el rango temporal que se está graficando
     try:
@@ -538,21 +550,32 @@ def crear_grafico_24h(symbol: str, ohlcv: list, timeframe: str) -> str:
         figcolor="#0b0e11",
     )
 
-    # Addplots para EMAs y Bollinger
-    apds = [
-        mpf.make_addplot(df_ohlc["EMA20"], color="#00e5ff", width=1),   # azul/turquesa
-        mpf.make_addplot(df_ohlc["EMA50"], color="#ffeb3b", width=1),   # amarilla
-        mpf.make_addplot(df_ohlc["EMA200"], color="#4caf50", width=1),  # verde
-        mpf.make_addplot(df_ohlc["BB_up"], color="#ff5722", width=1),   # banda sup
-        mpf.make_addplot(df_ohlc["BB_low"], color="#ff5722", width=1),  # banda inf
-    ]
+    # Helper para crear addplots solo si hay datos finitos
+    def _safe_addplot(series, color, width=1):
+        if series is None:
+            return None
+        vals = np.asarray(series.values, dtype=float)
+        if not np.isfinite(vals).any():
+            return None
+        return mpf.make_addplot(series, color=color, width=width, panel=0)
+
+    apds = []
+    ap_ema20 = _safe_addplot(ema20, "#00e5ff", 1)
+    ap_ema50 = _safe_addplot(ema50, "#ffeb3b", 1)
+    ap_ema200 = _safe_addplot(ema200, "#4caf50", 1)
+    ap_bb_up = _safe_addplot(bb_up, "#ff5722", 1)
+    ap_bb_low = _safe_addplot(bb_low, "#ff5722", 1)
+
+    for ap in (ap_ema20, ap_ema50, ap_ema200, ap_bb_up, ap_bb_low):
+        if ap is not None:
+            apds.append(ap)
 
     try:
         mpf.plot(
             df_ohlc,
             type="candle",
             style=style,
-            addplot=apds,
+            addplot=apds if apds else None,
             volume=True,
             ylabel="Price",
             ylabel_lower="Volume",
