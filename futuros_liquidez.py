@@ -1,5 +1,6 @@
 import time
 import json
+from datetime import datetime
 from pathlib import Path
 
 import ccxt
@@ -13,6 +14,8 @@ import pandas as pd
 import numpy as np
 import talib
 import yaml
+import matplotlib.pyplot as plt
+import mplfinance as mpf
 
 # =======================
 # CONFIGURACIÓN
@@ -57,7 +60,121 @@ BASE_TICKERS = [
 
 # Fichero para guardar el estado por símbolo real de futures (ej. "XRP/USDT:USDT")
 STATE_FILE = Path("state_kucoin_signals.json")
+SUMMARY_FILE = Path("daily_summary.json")
 
+
+def _cargar_resumen_diario():
+    """
+    Carga el estado del resumen diario desde disco.
+    Estructura:
+    {
+      "last_summary_date": "YYYY-MM-DD" | "",
+      "predicciones": [
+          {"symbol": "XRP/USDT:USDT", "side": "LONG", "entry_price": 0.0, "timeframe": "1h"}
+      ]
+    }
+    """
+    if SUMMARY_FILE.exists():
+        try:
+            with SUMMARY_FILE.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            data = {}
+    else:
+        data = {}
+
+    if "last_summary_date" not in data:
+        data["last_summary_date"] = ""
+    if "predicciones" not in data:
+        data["predicciones"] = []
+    return data
+
+
+def _guardar_resumen_diario(data: dict):
+    try:
+        with SUMMARY_FILE.open("w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"Error guardando resumen diario: {e}")
+
+
+def registrar_prediccion(symbol_real: str, side: str, entry_price: float, timeframe: str):
+    """
+    Registra una nueva predicción para el resumen diario.
+    symbol_real: símbolo tal y como lo usa el exchange (ej. 'XRP/USDT:USDT').
+    side: 'LONG' o 'SHORT'.
+    entry_price: precio de entrada recomendado.
+    """
+    data = _cargar_resumen_diario()
+    data["predicciones"].append(
+        {
+            "symbol": symbol_real,
+            "side": side,
+            "entry_price": float(entry_price),
+            "timeframe": timeframe,
+        }
+    )
+    _guardar_resumen_diario(data)
+
+
+def intentar_enviar_resumen_diario(exchange):
+    """
+    Si son las ~00:00 y aún no se ha enviado el resumen de hoy, calcula y envía
+    un resumen de las predicciones de las últimas 24h.
+    """
+    now = datetime.now()  # se asume timezone del servidor
+    hoy_str = now.strftime("%Y-%m-%d")
+
+    data = _cargar_resumen_diario()
+    last_summary = data.get("last_summary_date", "")
+    predicciones = data.get("predicciones", [])
+
+    # Nada que resumir
+    if not predicciones:
+        return
+
+    # Solo enviamos si estamos en la hora 0 y aún no hemos enviado el resumen hoy
+    if now.hour != 0 or last_summary == hoy_str:
+        return
+
+    lineas = ["📈 Ganancias en las últimas 24 horas:\n"]
+
+    for pred in predicciones:
+        symbol = pred["symbol"]
+        side = pred["side"]
+        entry_price = float(pred["entry_price"])
+
+        try:
+            ticker = exchange.fetch_ticker(symbol)
+            current_price = float(ticker.get("last") or ticker.get("close") or entry_price)
+        except Exception as e:
+            print(f"No se pudo obtener precio actual para {symbol}: {e}")
+            current_price = entry_price
+
+        if entry_price <= 0:
+            perf_pct = 0.0
+        else:
+            if side == "LONG":
+                perf_pct = (current_price - entry_price) / entry_price * 100.0
+            else:  # SHORT
+                perf_pct = (entry_price - current_price) / entry_price * 100.0
+
+        emoji = "🟢" if perf_pct >= 0 else "🚫"
+
+        # Nombre corto tipo SOLUSDT, TIAUSDT...
+        short_name = symbol.replace("/", "").replace(":", "")
+
+        lineas.append(f"{short_name:<10}: {perf_pct:+.2f}% {emoji}")
+
+    resumen = "\n".join(lineas)
+
+    # Enviamos resumen (sin aviso legal, como pediste)
+    enviar_mensaje(resumen)
+
+    # Marcamos que ya hemos enviado el resumen de hoy y vaciamos predicciones
+    data["last_summary_date"] = hoy_str
+    data["predicciones"] = []
+    _guardar_resumen_diario(data)
 
 # ==================================
 # PARÁMETROS DE LA ESTRATEGIA
@@ -184,9 +301,20 @@ def generar_senal(ohlcv: list, last_signal: str) -> dict:
 
     # 1. Preparar datos
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-    closes = df['close'].values
-    highs = df['high'].values
-    lows = df['low'].values
+
+    # Resumen de las últimas 24 velas (24h en TF 1h)
+    df_last_24 = df.tail(24)
+    change_24h_pct = (
+        (df_last_24["close"].iloc[-1] - df_last_24["close"].iloc[0])
+        / df_last_24["close"].iloc[0]
+        * 100.0
+    )
+    high_24h = df_last_24["high"].max()
+    low_24h = df_last_24["low"].min()
+
+    closes = df["close"].values
+    highs = df["high"].values
+    lows = df["low"].values
     
     # Valores de la última vela cerrada (entrada/referencia)
     last_close = closes[-1]
@@ -264,8 +392,8 @@ def generar_senal(ohlcv: list, last_signal: str) -> dict:
 
     # 5. Calcular SL/TP basado en ATR (Usando 2x ATR para SL, 4x ATR para TP)
     if senal != "NO_TRADE":
-        atr_multiplier_sl = 2.0
-        atr_multiplier_tp = 4.0 # Esto es una configuración de riesgo conservadora (Ratio 1:2)
+        atr_multiplier_sl = ATR_SL_MULT
+        atr_multiplier_tp = ATR_TP_MULT
         
         if senal == "LONG":
             stop_loss = last_close - (last_atr * atr_multiplier_sl)
@@ -281,7 +409,10 @@ def generar_senal(ohlcv: list, last_signal: str) -> dict:
         "stop_loss": stop_loss,
         "take_profit": take_profit,
         "timestamp_candle": last_timestamp,
-        "debug_score": f"LONG:{bullish_score}, SHORT:{bearish_score}" # DEBUG
+        "change_24h_pct": float(change_24h_pct),
+        "high_24h": float(high_24h),
+        "low_24h": float(low_24h),
+        "debug_score": f"LONG:{bullish_score}, SHORT:{bearish_score}"  # DEBUG
     }
 
 
@@ -306,6 +437,66 @@ def calcular_posicion(precio_entrada, stop_loss):
     tamaño = riesgo_dolares / distancia  # tamaño en unidades del activo
     return tamaño, riesgo_dolares
 
+
+def crear_grafico_24h(symbol: str, ohlcv: list, timeframe: str) -> str:
+    """
+    Genera un gráfico de velas de las últimas 24 velas (incluida la actual si viene en OHLCV)
+    con EMAs, RSI y MACD, y lo guarda en disco. Devuelve la ruta al PNG.
+    """
+    if len(ohlcv) < 24:
+        raise ValueError("No hay suficientes velas para generar el gráfico (mínimo 24).")
+
+    df = pd.DataFrame(
+        ohlcv,
+        columns=["timestamp", "open", "high", "low", "close", "volume"],
+    )
+
+    df_24 = df.tail(24).copy()
+    df_24["datetime"] = pd.to_datetime(df_24["timestamp"], unit="ms")
+    df_24.set_index("datetime", inplace=True)
+
+    df_ohlc = df_24[["open", "high", "low", "close", "volume"]].copy()
+    df_ohlc.columns = ["Open", "High", "Low", "Close", "Volume"]
+
+    closes = df_ohlc["Close"].astype(float).values
+
+    # Indicadores técnicos para el gráfico (mismos parámetros que la estrategia)
+    ema20 = talib.EMA(closes, timeperiod=20)
+    ema50 = talib.EMA(closes, timeperiod=50)
+    ema200 = talib.EMA(closes, timeperiod=200)
+    rsi = talib.RSI(closes, timeperiod=14)
+    macd, macdsignal, macdhist = talib.MACD(
+        closes, fastperiod=12, slowperiod=26, signalperiod=9
+    )
+
+    apds = [
+        mpf.make_addplot(ema20, panel=0),
+        mpf.make_addplot(ema50, panel=0),
+        mpf.make_addplot(ema200, panel=0),
+        mpf.make_addplot(rsi, panel=1),
+        mpf.make_addplot(macd, panel=2),
+        mpf.make_addplot(macdsignal, panel=2),
+        mpf.make_addplot(macdhist, type="bar", panel=2),
+    ]
+
+    os.makedirs("charts", exist_ok=True)
+    filename = f"{symbol.replace('/', '_')}_{timeframe}_24h.png"
+    filepath = os.path.join("charts", filename)
+
+    try:
+        mpf.plot(
+            df_ohlc,
+            type="candle",
+            addplot=apds,
+            title=f"{symbol} - últimas 24 velas ({timeframe})",
+            savefig=filepath,
+        )
+        plt.close("all")
+    except Exception as e:
+        print(f"Error generando gráfico para {symbol}: {e}")
+        raise
+
+    return filepath
 
 # ==================================
 # EXCHANGE / DATA / TELEGRAM / STATE
@@ -372,6 +563,25 @@ def enviar_mensaje(texto: str):
         print("Error enviando mensaje a Telegram:", e)
 
 
+def enviar_imagen(ruta_imagen: str, caption: str = ""):
+    """
+    Envía una imagen a Telegram como foto, con un caption opcional.
+    """
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print("Faltan TELEGRAM_BOT_TOKEN o TELEGRAM_CHAT_ID, no se envía la imagen.")
+        return
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+    try:
+        with open(ruta_imagen, "rb") as f:
+            files = {"photo": f}
+            data = {"chat_id": TELEGRAM_CHAT_ID, "caption": caption}
+            r = requests.post(url, data=data, files=files, timeout=20)
+            print("Respuesta Telegram (imagen):", r.status_code, r.text)
+            r.raise_for_status()
+    except Exception as e:
+        print("Error enviando imagen a Telegram:", e)
+
 def cargar_state():
     if STATE_FILE.exists():
         try:
@@ -402,7 +612,11 @@ def main_loop():
         print("No se encontraron símbolos de futuros para las bases especificadas.")
         return
 
+    print("Iniciando loop principal...")
     while True:
+        # Intentar enviar el resumen diario alrededor de las 00:00
+        intentar_enviar_resumen_diario(exchange)
+
         try:
             for base in BASE_TICKERS:
                 symbol = symbol_map.get(base)
@@ -410,15 +624,11 @@ def main_loop():
                     continue
 
                 # --- INICIALIZACIÓN POR SÍMBOLO ---
-                # 1. Cargar el estado anterior (garantiza que sym_state siempre existe)
                 sym_state = state.get(symbol, {"last_candle_ts": 0, "last_signal": "NO_TRADE"})
-                
-                # 2. Definir last_signal y last_candle_ts (evita 'referenced before assignment')
                 last_signal = sym_state.get("last_signal", "NO_TRADE")
                 last_candle_ts = sym_state.get("last_candle_ts", 0)
-                
-                # Usaremos new_signal para guardar el estado al final
-                new_last_signal = last_signal 
+
+                new_last_signal = last_signal
                 new_last_candle_ts = last_candle_ts
 
                 try:
@@ -427,8 +637,8 @@ def main_loop():
                     if not ohlcv:
                         print("No se han recibido datos OHLCV para", symbol)
                         continue
-                    
-                    # Llamada a generar_senal CORREGIDA: Se pasa el estado anterior
+
+                    # Generar señal
                     info = generar_senal(ohlcv, last_signal)
                     senal = info.get("senal", "NO_TRADE")
                     ts_candle = info.get("timestamp_candle")
@@ -438,13 +648,13 @@ def main_loop():
                     if ts_candle is None:
                         print("No hay timestamp en la señal. Info:", info)
                         continue
-                    
+
                     # --- LÓGICA DE NUEVA VELA ---
                     if ts_candle > last_candle_ts:
                         print(f"Vela nueva en {symbol}. Señal entrada: {senal}, last_signal: {last_signal}")
                         new_last_candle_ts = ts_candle
-                        
-                        # 1) SALIDA TRAILING POR CRUCE EMA
+
+                        # 1) SALIDA TRAILING POR CRUCE EMA (actualmente no se dispara porque no calculas cruce_*)
                         if last_signal == "LONG" and cruce_bajista:
                             mensaje_salida = (
                                 f"SALIDA LONG (Trailing EMA)\n"
@@ -452,11 +662,12 @@ def main_loop():
                                 f"Timeframe: {TIMEFRAME}\n\n"
                                 f"Motivo: EMA9 cruza por DEBAJO de EMA21.\n"
                                 f"EMA9: {info.get('ema_rapida'):.6f}\n"
-                                f"EMA21: {info.get('ema_lenta'):.6f}\n"
+                                f"EMA21: {info.get('ema_lenta'):.6f}\n\n"
+                                f"⚠️ Aviso: Este mensaje es solo información y NO constituye recomendación de inversión."
                             )
                             enviar_mensaje(mensaje_salida)
-                            new_last_signal = "NO_TRADE" # Cierra la posición anterior
-                            
+                            new_last_signal = "NO_TRADE"
+
                         elif last_signal == "SHORT" and cruce_alcista:
                             mensaje_salida = (
                                 f"SALIDA SHORT (Trailing EMA)\n"
@@ -464,45 +675,58 @@ def main_loop():
                                 f"Timeframe: {TIMEFRAME}\n\n"
                                 f"Motivo: EMA9 cruza por ENCIMA de EMA21.\n"
                                 f"EMA9: {info.get('ema_rapida'):.6f}\n"
-                                f"EMA21: {info.get('ema_lenta'):.6f}\n"
+                                f"EMA21: {info.get('ema_lenta'):.6f}\n\n"
+                                f"⚠️ Aviso: Este mensaje es solo información y NO constituye recomendación de inversión."
                             )
                             enviar_mensaje(mensaje_salida)
-                            new_last_signal = "NO_TRADE" # Cierra la posición anterior
+                            new_last_signal = "NO_TRADE"
 
                         # 2) ENTRADA NUEVA
                         stop_loss = info.get("stop_loss")
                         take_profit = info.get("take_profit")
-                        precio_senal = info.get("precio") # Precio de CIERRE de la vela de señal
+                        precio_senal = info.get("precio")  # Precio de CIERRE de la vela de señal
 
-                        if senal in ("LONG", "SHORT") and last_signal != senal and stop_loss and take_profit and precio_senal:
+                        if (
+                            senal in ("LONG", "SHORT")
+                            and last_signal != senal
+                            and stop_loss
+                            and take_profit
+                            and precio_senal
+                        ):
                             es_valido = True
-                            precio_entrada_real = precio_senal # valor por defecto
-                            
+                            precio_entrada_real = precio_senal  # valor por defecto
+
                             # --- FILTRO DE PRECIO (SLIPPAGE + SL) ---
                             try:
                                 ticker = exchange.fetch_ticker(symbol)
-
-                                # Aseguramos tener ask/bid; si no, usamos last
                                 ask = ticker.get("ask") or ticker.get("last")
                                 bid = ticker.get("bid") or ticker.get("last")
 
                                 if ask is None or bid is None:
                                     raise Exception("Ticker sin ask/bid válidos")
 
-                                # 1. Comprobación contra el Stop Loss (señal invalidada)
+                                # 1. Comprobación contra el Stop Loss
                                 if senal == "LONG" and ask < stop_loss:
-                                    print(f"LONG RECHAZADO: Precio actual ({ask:.6f}) ya está por debajo del SL ({stop_loss:.6f}).")
+                                    print(
+                                        f"LONG RECHAZADO: Precio actual ({ask:.6f}) "
+                                        f"ya está por debajo del SL ({stop_loss:.6f})."
+                                    )
                                     es_valido = False
                                 elif senal == "SHORT" and bid > stop_loss:
-                                    print(f"SHORT RECHAZADO: Precio actual ({bid:.6f}) ya está por encima del SL ({stop_loss:.6f}).")
+                                    print(
+                                        f"SHORT RECHAZADO: Precio actual ({bid:.6f}) "
+                                        f"ya está por encima del SL ({stop_loss:.6f})."
+                                    )
                                     es_valido = False
 
-                                # 2. Comprobación de slippage sólo si sigue siendo válida
+                                # 2. Comprobación de slippage
                                 if es_valido:
                                     if senal == "LONG":
                                         if ask > precio_senal * (1 + MAX_SLIPPAGE_PCT):
                                             print(
-                                                f"LONG RECHAZADO: ask {ask:.6f} muy por encima del precio de señal {precio_senal:.6f} (slippage > {MAX_SLIPPAGE_PCT*100:.1f}%)."
+                                                f"LONG RECHAZADO: ask {ask:.6f} muy por encima "
+                                                f"del precio de señal {precio_senal:.6f} "
+                                                f"(slippage > {MAX_SLIPPAGE_PCT*100:.1f}%)."
                                             )
                                             es_valido = False
                                         else:
@@ -510,12 +734,14 @@ def main_loop():
                                     elif senal == "SHORT":
                                         if bid < precio_senal * (1 - MAX_SLIPPAGE_PCT):
                                             print(
-                                                f"SHORT RECHAZADO: bid {bid:.6f} muy por debajo del precio de señal {precio_senal:.6f} (slippage > {MAX_SLIPPAGE_PCT*100:.1f}%)."
+                                                f"SHORT RECHAZADO: bid {bid:.6f} muy por debajo "
+                                                f"del precio de señal {precio_senal:.6f} "
+                                                f"(slippage > {MAX_SLIPPAGE_PCT*100:.1f}%)."
                                             )
                                             es_valido = False
                                         else:
                                             precio_entrada_real = bid
-                                            
+
                             except Exception as e_ticker:
                                 print(
                                     f"Error al obtener ticker en tiempo real para slippage: {e_ticker}. "
@@ -526,36 +752,65 @@ def main_loop():
 
                             # --- Ejecución de la Señal si es Válida ---
                             if es_valido:
-                                # Recalculamos el tamaño de la posición con el nuevo precio de entrada más preciso
                                 tamaño, riesgo = calcular_posicion(precio_entrada_real, stop_loss)
 
+                                # PRECIOS
+                                precio_actual = precio_entrada_real
+                                precio_entrada_teorica = precio_senal
+
+                                # Emoji según dirección
+                                emoji_side = "🟢" if senal == "LONG" else "🔴"
+
+                                # Justificación básica
+                                if senal == "LONG":
+                                    justificacion = (
+                                        "Los indicadores de tendencia (EMAs) y momentum "
+                                        "(MACD y RSI) apuntan a un posible movimiento alcista."
+                                    )
+                                else:
+                                    justificacion = (
+                                        "Los indicadores de tendencia (EMAs) y momentum "
+                                        "(MACD y RSI) apuntan a un posible movimiento bajista."
+                                    )
+
+                                # Caption completo (mensaje único)
                                 mensaje_entrada = (
-                                    f"ENTRADA {senal} Futuros KuCoin (x{APALANCAMIENTO_FIJO} sugerido)\n"
-                                    f"Par: {symbol}\n"
-                                    f"Timeframe: {TIMEFRAME}\n\n"
-                                    f"Precio entrada (real ask/bid): {precio_entrada_real:.6f}\n"
-                                    f"Precio de Señal (Cierre Vela): {precio_senal:.6f}\n"
-                                    f"Stop Loss (ATR {ATR_SL_MULT}x): {stop_loss:.6f}\n"
-                                    f"Take Profit (ATR {ATR_TP_MULT}x): {take_profit:.6f}\n\n"
-                                    f"Tamaño teórico sugerido: {tamaño:.6f} unidades\n"
-                                    f"Riesgo teórico ({RIESGO_POR_OPERACION*100:.1f}% de {BALANCE_TEORICO}$): {riesgo:.2f} USDT\n\n"
-                                    f"Nota: Bot educativo. No es recomendación de inversión."
+                                    "🎯 ALERTA DE ENTRADA 🎯\n"
+                                    f"📈Par: {symbol} - {senal}{emoji_side}\n"
+                                    f"💰Precio actual: ${precio_actual:.6f}\n"
+                                    f"💰 Precio de entrada: ${precio_entrada_teorica:.6f}\n"
+                                    f"🛡️ Stop-Loss: ${stop_loss:.6f}\n"
+                                    f"🎯 Take-Profit: ${take_profit:.6f}\n\n"
+                                    f"⏳Temporalidad: {TIMEFRAME}\n"
+                                    f"📊Apalancamiento: x{APALANCAMIENTO_FIJO}\n\n"
+                                    "Justificación de la señal:\n"
+                                    f"{justificacion}\n\n"
+                                    "ATENCIÓN: Este mensaje es solo informativo y no representa "
+                                    "una recomendación de inversión."
                                 )
 
-                                enviar_mensaje(mensaje_entrada)
-                                new_last_signal = senal # Se actualiza la señal
+                                # Registrar esta predicción para el resumen diario
+                                registrar_prediccion(symbol, senal, precio_entrada_teorica, TIMEFRAME)
+
+                                # Generar y enviar gráfico de las últimas 24 velas con indicadores
+                                try:
+                                    ruta_chart = crear_grafico_24h(symbol, ohlcv, TIMEFRAME)
+                                    enviar_imagen(ruta_chart, caption=mensaje_entrada)
+                                except Exception as e:
+                                    print(f"No se pudo generar/enviar el gráfico de {symbol}: {e}")
+                                    enviar_mensaje(mensaje_entrada)
+
+                                new_last_signal = senal
                             else:
                                 print("Señal rechazada por slippage/SL.")
                         else:
-                            # La señal era NO_TRADE, o la señal es igual a la anterior y no se sale.
                             print("Sin nueva entrada operable en esta vela.")
                             if senal == "NO_TRADE":
                                 new_last_signal = "NO_TRADE"
-                                
 
                     else:
                         print(f"Misma vela en {symbol}, esperando cierre...")
-                    
+
                     # --- ACTUALIZAR ESTADO DEL SÍMBOLO ---
                     state[symbol] = {
                         "last_candle_ts": int(new_last_candle_ts),
@@ -566,8 +821,6 @@ def main_loop():
 
                 except Exception as e_sym:
                     print(f"Error procesando {symbol}: {e_sym}")
-                    # Si hay un error, el estado que se guarda es el que se cargó al inicio del loop del símbolo, 
-                    # ya que new_last_signal y new_last_candle_ts no se actualizaron con éxito.
 
             guardar_state(state)
 
