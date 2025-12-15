@@ -181,6 +181,8 @@ def intentar_enviar_resumen_diario(exchange):
 # ==================================
 # PARÁMETROS DE LA ESTRATEGIA
 # ==================================
+# NOTA: Los siguientes se mantienen aunque no se usen para no romper la compatibilidad
+# con el resto del código, pero la estrategia de scoring ya no los usa.
 EMA_RAPIDA_PERIOD = 9
 EMA_LENTA_PERIOD = 21
 EMA_TENDENCIA_PERIOD = 100  # Filtro de tendencia
@@ -268,8 +270,6 @@ def atr(ohlcv, period=ATR_PERIOD):
 
 # ==================================
 # FUNCIÓN DE SEÑALES (ESTRATEGIA AVANZADA - SWAP)
-# La lógica interna fue reemplazada por una versión simplificada de la estrategia
-# de scoring (puntuación) del bot externo.
 # ==================================
 
 # --- PARÁMETROS DE LA NUEVA ESTRATEGIA (Ajustables) ---
@@ -304,8 +304,8 @@ UPDATE_INTERVAL = settings_cfg.get("update_interval", 30)
 
 def generar_senal(ohlcv: list, last_signal: str) -> dict:
     """
-    Genera la señal de trading basada en EMA, MACD y RSI con un sistema de scoring (puntuación).
-    También calcula SL/TP basado en el último ATR.
+    Genera la señal de trading basada en EMAs 20/50 y Estocástico (14, 3, 5) con un sistema de scoring.
+    También calcula SL/TP basado en porcentaje.
     ohlcv debe tener al menos 200 velas.
     """
     if len(ohlcv) < 200:
@@ -332,65 +332,67 @@ def generar_senal(ohlcv: list, last_signal: str) -> dict:
     last_close = closes[-1]
     last_timestamp = ohlcv[-1][0] # Último timestamp de cierre
 
-    # 2. Calcular Indicadores TÉCNICOS
+    # 2. Calcular Indicadores TÉCNICOS (EMA 20, 50 y Estocástico 14, 3, 5)
     ema_20 = talib.EMA(closes, timeperiod=20)
     ema_50 = talib.EMA(closes, timeperiod=50)
-    ema_200 = talib.EMA(closes, timeperiod=200)
+    # MACD y RSI ELIMINADOS
     
-    macd, macdsignal, macdhist = talib.MACD(closes, fastperiod=12, slowperiod=26, signalperiod=9)
-    rsi = talib.RSI(closes, timeperiod=14)
-    
-    # Calcular ATR para SL/TP (manteniendo la gestión de riesgo original)
+    # Estocástico (Stochastic Oscillator: K=14, D=3, Slowing=5)
+    # La configuración que se ajusta a (K=14, Slowing=5, D=3) en TA-Lib es:
+    slowk, slowd = talib.STOCH(
+        highs, lows, closes, 
+        fastk_period=14, 
+        slowk_period=5, # Este es el Slowing de 5
+        slowd_period=3
+    )
+
+    # Calcular ATR para SL/TP (se mantiene el cálculo, aunque no se usa en la lógica de señal)
     atr_vals = talib.ATR(highs, lows, closes, timeperiod=14)
-    last_atr = atr_vals[-1]
+    # last_atr = atr_vals[-1] # No se usa
 
     # Tomar los últimos valores de los indicadores (vela cerrada)
     last_ema_20 = ema_20[-1]
     last_ema_50 = ema_50[-1]
-    last_ema_200 = ema_200[-1]
-    last_macd_hist = macdhist[-1]
-    last_rsi = rsi[-1]
+    last_stoch_k = slowk[-1] # %K (Línea rápida del estocástico)
+    last_stoch_d = slowd[-1] # %D (Línea lenta o media móvil de %K)
+    
+    # Los valores penúltimos para detectar cruces de Estocástico
+    prev_stoch_k = slowk[-2]
+    prev_stoch_d = slowd[-2]
     
     # 3. Calcular la Puntuación (Scoring) de Señal
     # Se inicializa el score a 0
     bullish_score = 0
     bearish_score = 0
 
-    # --- PUNTUACIÓN LONG (BULLISH) ---
-    # 1. Trend Filter: EMA 50 > EMA 200 (Tendencia alcista)
-    if last_ema_50 > last_ema_200:
-        bullish_score += 20
+    # PUNTUACIÓN LONG (BULLISH)
+    # 1. Trend Filter: EMA 20 > EMA 50 (Tendencia Alcista)
+    if last_ema_20 > last_ema_50:
+        bullish_score += 40
         
     # 2. Entry Price: Cierre > EMA 20 (Por encima del precio medio rápido)
     if last_close > last_ema_20:
         bullish_score += 20
         
-    # 3. Momentum: MACD Histograma > 0 (Momentum positivo)
-    if last_macd_hist > 0:
-        bullish_score += 30
+    # 3. Momentum: %K cruza %D al alza (Condición de entrada por Estocástico)
+    # Cruce al alza: %K anterior <= %D anterior Y %K actual > %D actual
+    if prev_stoch_k <= prev_stoch_d and last_stoch_k > last_stoch_d:
+        bullish_score += 40
         
-    # 4. Strength: RSI > 55 (Fuerza alcista)
-    if last_rsi > 55:
-        bullish_score += 30
-        
-    # --- PUNTUACIÓN SHORT (BEARISH) ---
-    # 1. Trend Filter: EMA 50 < EMA 200 (Tendencia bajista)
-    if last_ema_50 < last_ema_200:
-        bearish_score += 20
+    # PUNTUACIÓN SHORT (BEARISH)
+    # 1. Trend Filter: EMA 20 < EMA 50 (Tendencia Bajista)
+    if last_ema_20 < last_ema_50:
+        bearish_score += 40
         
     # 2. Entry Price: Cierre < EMA 20 (Por debajo del precio medio rápido)
     if last_close < last_ema_20:
         bearish_score += 20
         
-    # 3. Momentum: MACD Histograma < 0 (Momentum negativo)
-    if last_macd_hist < 0:
-        bearish_score += 30
+    # 3. Momentum: %K cruza %D a la baja (Condición de entrada por Estocástico)
+    # Cruce a la baja: %K anterior >= %D anterior Y %K actual < %D actual
+    if prev_stoch_k >= prev_stoch_d and last_stoch_k < last_stoch_d:
+        bearish_score += 40
         
-    # 4. Strength: RSI < 45 (Fuerza bajista)
-    if last_rsi < 45:
-        bearish_score += 30
-        
-
     # 4. Generar la Señal Final
     senal = "NO_TRADE"
     stop_loss = 0
@@ -452,9 +454,9 @@ def crear_grafico_24h(symbol: str, ohlcv: list, timeframe: str) -> str:
     """
     Genera un gráfico tipo "trading spot":
     - Velas (últimas NUM_CANDLES_CHART).
-    - EMAs 20 / 50 / 200 (si hay datos válidos).
-    - Bandas de Bollinger (20, 2σ) (si hay datos válidos).
-    - Volumen en panel inferior.
+    - EMAs 20 / 50.
+    - Estocástico K(14), D(3), Slowing(5) en panel inferior.
+    - Volumen en panel intermedio.
     Devuelve la ruta al PNG.
     """
     if len(ohlcv) < 60:
@@ -493,32 +495,40 @@ def crear_grafico_24h(symbol: str, ohlcv: list, timeframe: str) -> str:
 
     # Cálculo de indicadores sobre el tramo que vamos a graficar
     closes = df_ohlc["Close"].astype(float).values
+    highs = df_ohlc["High"].astype(float).values
+    lows = df_ohlc["Low"].astype(float).values
+
 
     if len(closes) < 20:
-        raise ValueError("No hay suficientes velas para EMAs/Bollinger (mínimo 20).")
+        raise ValueError("No hay suficientes velas para EMAs/Estocástico (mínimo 20).")
 
     try:
+        # EMAs 20 y 50
         ema20_arr = talib.EMA(closes, timeperiod=20)
         ema50_arr = talib.EMA(closes, timeperiod=50)
-        ema200_arr = talib.EMA(closes, timeperiod=200)
-
-        upper_arr, middle_arr, lower_arr = talib.BBANDS(
-            closes, timeperiod=20, nbdevup=2, nbdevdn=2, matype=0
+        # EMA200 y BBANDS ELIMINADOS
+        
+        # Estocástico (Stochastic Oscillator: K=14, D=3, Slowing=5)
+        slowk_arr, slowd_arr = talib.STOCH(
+            highs, lows, closes, 
+            fastk_period=14, 
+            slowk_period=5, # Este es el Slowing de 5
+            slowd_period=3
         )
+        
     except Exception as e_ind:
-        print(f"Error calculando EMAs/Bollinger para {symbol}: {e_ind}")
+        print(f"Error calculando EMAs/Stoch para {symbol}: {e_ind}")
         # Si fallan los indicadores, graficamos solo velas + volumen
-        ema20_arr = ema50_arr = ema200_arr = upper_arr = middle_arr = lower_arr = None
+        ema20_arr = ema50_arr = slowk_arr = slowd_arr = None
 
     # Convertimos a Series alineadas con el índice
     if ema20_arr is not None:
         ema20 = pd.Series(ema20_arr, index=df_ohlc.index)
         ema50 = pd.Series(ema50_arr, index=df_ohlc.index)
-        ema200 = pd.Series(ema200_arr, index=df_ohlc.index)
-        bb_up = pd.Series(upper_arr, index=df_ohlc.index)
-        bb_low = pd.Series(lower_arr, index=df_ohlc.index)
+        stoch_k = pd.Series(slowk_arr, index=df_ohlc.index)
+        stoch_d = pd.Series(slowd_arr, index=df_ohlc.index)
     else:
-        ema20 = ema50 = ema200 = bb_up = bb_low = None
+        ema20 = ema50 = stoch_k = stoch_d = None
 
     # Log para ver el rango temporal que se está graficando
     try:
@@ -551,22 +561,39 @@ def crear_grafico_24h(symbol: str, ohlcv: list, timeframe: str) -> str:
     )
 
     # Helper para crear addplots solo si hay datos finitos
-    def _safe_addplot(series, color, width=1):
+    def _safe_addplot(series, color, width=1, panel=0, **kwargs):
         if series is None:
             return None
         vals = np.asarray(series.values, dtype=float)
         if not np.isfinite(vals).any():
             return None
-        return mpf.make_addplot(series, color=color, width=width, panel=0)
+        return mpf.make_addplot(series, color=color, width=width, panel=panel, **kwargs)
 
     apds = []
-    ap_ema20 = _safe_addplot(ema20, "#00e5ff", 1)
-    ap_ema50 = _safe_addplot(ema50, "#ffeb3b", 1)
-    ap_ema200 = _safe_addplot(ema200, "#4caf50", 1)
-    ap_bb_up = _safe_addplot(bb_up, "#ff5722", 1)
-    ap_bb_low = _safe_addplot(bb_low, "#ff5722", 1)
+    
+    # EMAs 20 y 50 (Panel 0 - Precios)
+    ap_ema20 = _safe_addplot(ema20, "#00e5ff", 1, panel=0)
+    ap_ema50 = _safe_addplot(ema50, "#ffeb3b", 1, panel=0)
+    
+    # Estocástico K y D (Panel 1 - Debajo del volumen)
+    # Nota: El volumen es el panel por defecto (panel=0) si no se especifica
+    # o si se usa el `volume=True`. El panel de volumen se cuenta como panel 1
+    # si usamos `panel_ratios`. Vamos a usar panel_ratios=(6, 3, 3) para Vela/Vol/Stoch
+    ap_stoch_k = _safe_addplot(stoch_k, "#00e5ff", 1, panel=2) # Panel 2 = 3er panel
+    ap_stoch_d = _safe_addplot(stoch_d, "#ffeb3b", 1, panel=2)
+    
+    # Líneas de sobrecompra/sobreventa para Estocástico
+    hlines_stoch_overbought = mpf.make_addplot(
+        pd.Series([80.0] * len(df_ohlc), index=df_ohlc.index), 
+        panel=2, color="red", secondary_y=False, linestyle="--", width=0.7
+    )
+    hlines_stoch_oversold = mpf.make_addplot(
+        pd.Series([20.0] * len(df_ohlc), index=df_ohlc.index), 
+        panel=2, color="green", secondary_y=False, linestyle="--", width=0.7
+    )
 
-    for ap in (ap_ema20, ap_ema50, ap_ema200, ap_bb_up, ap_bb_low):
+    # Agregamos los addplots al contenedor
+    for ap in (ap_ema20, ap_ema50, ap_stoch_k, ap_stoch_d, hlines_stoch_overbought, hlines_stoch_oversold):
         if ap is not None:
             apds.append(ap)
 
@@ -577,6 +604,7 @@ def crear_grafico_24h(symbol: str, ohlcv: list, timeframe: str) -> str:
             style=style,
             addplot=apds if apds else None,
             volume=True,
+            panel_ratios=(6, 1, 3), # Vela (6), Volumen (1), Estocástico (3)
             ylabel="Price",
             ylabel_lower="Volume",
             title=f"{symbol} - Señales de Trading ({timeframe})",
@@ -736,8 +764,9 @@ def main_loop():
                     info = generar_senal(ohlcv, last_signal)
                     senal = info.get("senal", "NO_TRADE")
                     ts_candle = info.get("timestamp_candle")
-                    cruce_alcista = info.get("cruce_alcista", False)
-                    cruce_bajista = info.get("cruce_bajista", False)
+                    # Los campos cruce_alcista/bajista ya no se calculan en generar_senal, se dejan por compatibilidad
+                    cruce_alcista = False
+                    cruce_bajista = False 
 
                     if ts_candle is None:
                         print("No hay timestamp en la señal. Info:", info)
@@ -748,15 +777,14 @@ def main_loop():
                         print(f"Vela nueva en {symbol}. Señal entrada: {senal}, last_signal: {last_signal}")
                         new_last_candle_ts = ts_candle
 
-                        # 1) SALIDA TRAILING POR CRUCE EMA (actualmente no se dispara porque no calculas cruce_*)
+                        # 1) SALIDA TRAILING POR CRUCE EMA (se mantiene la estructura pero ahora no se dispara)
+                        # El código no calcula los campos "cruce_*" ni las EMAs que usa esta lógica de salida
                         if last_signal == "LONG" and cruce_bajista:
                             mensaje_salida = (
                                 f"SALIDA LONG (Trailing EMA)\n"
                                 f"Par: {symbol}\n"
                                 f"Timeframe: {TIMEFRAME}\n\n"
-                                f"Motivo: EMA9 cruza por DEBAJO de EMA21.\n"
-                                f"EMA9: {info.get('ema_rapida'):.6f}\n"
-                                f"EMA21: {info.get('ema_lenta'):.6f}\n\n"
+                                f"Motivo: Cruce de EMA de salida.\n"
                                 f"⚠️ Aviso: Este mensaje es solo información y NO constituye recomendación de inversión."
                             )
                             enviar_mensaje(mensaje_salida)
@@ -767,9 +795,7 @@ def main_loop():
                                 f"SALIDA SHORT (Trailing EMA)\n"
                                 f"Par: {symbol}\n"
                                 f"Timeframe: {TIMEFRAME}\n\n"
-                                f"Motivo: EMA9 cruza por ENCIMA de EMA21.\n"
-                                f"EMA9: {info.get('ema_rapida'):.6f}\n"
-                                f"EMA21: {info.get('ema_lenta'):.6f}\n\n"
+                                f"Motivo: Cruce de EMA de salida.\n"
                                 f"⚠️ Aviso: Este mensaje es solo información y NO constituye recomendación de inversión."
                             )
                             enviar_mensaje(mensaje_salida)
@@ -855,16 +881,16 @@ def main_loop():
                                 # Emoji según dirección
                                 emoji_side = "🟢" if senal == "LONG" else "🔴"
 
-                                # Justificación básica
+                                # Justificación modificada
                                 if senal == "LONG":
                                     justificacion = (
-                                        "Los indicadores de tendencia (EMAs) y momentum "
-                                        "(MACD y RSI) apuntan a un posible movimiento alcista."
+                                        "Los indicadores de tendencia (EMAs 20/50) y momentum "
+                                        "(Estocástico K/D) apuntan a un posible movimiento alcista."
                                     )
                                 else:
                                     justificacion = (
-                                        "Los indicadores de tendencia (EMAs) y momentum "
-                                        "(MACD y RSI) apuntan a un posible movimiento bajista."
+                                        "Los indicadores de tendencia (EMAs 20/50) y momentum "
+                                        "(Estocástico K/D) apuntan a un posible movimiento bajista."
                                     )
 
                                 # Caption completo (mensaje único)
@@ -879,8 +905,8 @@ def main_loop():
                                     f"📊Apalancamiento: x{APALANCAMIENTO_FIJO}\n\n"
                                     "📌 En el gráfico se muestran:\n"
                                     "• Velas japonesas\n"
-                                    "• Bandas de Bollinger (20, 2σ)\n"
-                                    "• EMAs 20, 50 y 200\n\n"
+                                    "• EMAs 20 y 50\n"
+                                    "• Estocástico (14, 3, 5)\n\n"
                                     "Justificación de la señal:\n"
                                     f"{justificacion}\n\n"
                                     "ATENCIÓN: Este mensaje es solo informativo y no representa "
@@ -890,7 +916,7 @@ def main_loop():
                                 # Registrar esta predicción para el resumen diario
                                 registrar_prediccion(symbol, senal, precio_entrada_teorica, TIMEFRAME)
 
-                                # Generar y enviar gráfico de las últimas 24 velas con indicadores
+                                # Generar y enviar gráfico actualizado
                                 try:
                                     ruta_chart = crear_grafico_24h(symbol, ohlcv, TIMEFRAME)
                                     enviar_imagen(ruta_chart, caption=mensaje_entrada)
