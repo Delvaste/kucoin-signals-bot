@@ -1,5 +1,5 @@
 settings:
-  timeframe: "1h"          # mismo valor que ahora
+  timeframe: "1m"          # mismo valor que ahora
   update_interval: 30      # segundos entre ciclos del bot
   max_slippage_pct: 0.005  # 0.5% de slippage máximo
   balance_teorico: 50.0
