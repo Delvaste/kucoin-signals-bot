@@ -50,6 +50,8 @@ TIMEFRAME = "1h"
 # Slippage máximo permitido (0.5% = 0.005)
 MAX_SLIPPAGE_PCT = 0.005
 
+# Zona horaria para los gráficos (por defecto UTC, se sobrescribe con config.yml)
+TIMEZONE = "UTC"
 # Lista de ALTCOINS (ACTUALIZADA: < $5 USD, Alta Liquidez en Futuros, Timeframe 1h)
 BASE_TICKERS = [
     "XRP", "ADA", "NEAR", "WLD", "FIL", "ARB", "OP", "SUI", "SEI", 
@@ -201,7 +203,7 @@ APALANCAMIENTO_FIJO = 10       # Apalancamiento deseado (x10)
 # ==================================
 
 def ema(values, period):
-    # ... (Código de EMA)
+    values = list(values)
     if not values:
         return []
 
@@ -281,6 +283,7 @@ strategy_cfg = CONFIG.get("strategy", {})
 # SETTINGS
 TIMEFRAME = settings_cfg.get("timeframe", TIMEFRAME)
 MAX_SLIPPAGE_PCT = settings_cfg.get("max_slippage_pct", MAX_SLIPPAGE_PCT)
+TIMEZONE = settings_cfg.get("timezone", TIMEZONE)
 BALANCE_TEORICO = settings_cfg.get("balance_teorico", BALANCE_TEORICO)
 RIESGO_POR_OPERACION = settings_cfg.get("riesgo_por_operacion", RIESGO_POR_OPERACION)
 APALANCAMIENTO_FIJO = settings_cfg.get("apalancamiento", APALANCAMIENTO_FIJO)
@@ -445,40 +448,63 @@ def calcular_posicion(precio_entrada, stop_loss):
 def crear_grafico_24h(symbol: str, ohlcv: list, timeframe: str) -> str:
     """
     Genera un gráfico de velas de las últimas 24 velas (incluida la actual si viene en OHLCV)
-    con medias móviles simples y volumen, y lo guarda en disco. Devuelve la ruta al PNG.
+    y lo guarda en disco. Devuelve la ruta al PNG.
     """
-    if len(ohlcv) < 24:
-        raise ValueError("No hay suficientes velas para generar el gráfico (mínimo 24).")
+    if len(ohlcv) < 48:
+        raise ValueError("No hay suficientes velas para generar el gráfico (mínimo 48).")
 
-    # DataFrame con todas las velas y nos quedamos solo con las últimas 24
+    # DataFrame con TODAS las velas recibidas
     df = pd.DataFrame(
         ohlcv,
         columns=["timestamp", "open", "high", "low", "close", "volume"],
     )
 
-    df_24 = df.tail(24).copy()
-    df_24["datetime"] = pd.to_datetime(df_24["timestamp"], unit="ms")
-    df_24.set_index("datetime", inplace=True)
+    # Aseguramos que están ordenadas por timestamp
+    df = df.sort_values("timestamp")
 
-    df_ohlc = df_24[["open", "high", "low", "close", "volume"]].copy()
+    # Nos quedamos solo con las últimas 48
+    df_48 = df.tail(48).copy()
+
+    # Convertimos a datetime en UTC y luego a la zona horaria configurada
+    dt = pd.to_datetime(df_48["timestamp"], unit="ms", utc=True)
+    if TIMEZONE and TIMEZONE != "UTC":
+        try:
+            dt = dt.dt.tz_convert(TIMEZONE)
+        except Exception as e:
+            print(f"No se pudo aplicar timezone {TIMEZONE}, usando UTC. Error: {e}")
+    df_48["datetime"] = dt
+    df_48.set_index("datetime", inplace=True)
+
+    # DataFrame en el formato que espera mplfinance
+    df_ohlc = df_48[["open", "high", "low", "close", "volume"]].copy()
     df_ohlc.columns = ["Open", "High", "Low", "Close", "Volume"]
 
+    # Log para ver el rango temporal que se está graficando
+    try:
+        print(
+            f"Gráfico {symbol}: desde {df_48.index[0]} hasta {df_48.index[-1]} "
+            f"(TIMEFRAME={timeframe}, TIMEZONE={TIMEZONE})"
+        )
+    except Exception:
+        pass
+
     os.makedirs("charts", exist_ok=True)
-    filename = f"{symbol.replace('/', '_').replace(':', '_')}_{timeframe}_24h.png"
+    filename = f"{symbol.replace('/', '_').replace(':', '_')}_{timeframe}_48h.png"
     filepath = os.path.join("charts", filename)
 
     try:
+        # Gráfico sencillo: velas + medias móviles y volumen
         mpf.plot(
             df_ohlc,
             type="candle",
-            mav=(9, 20),          # medias móviles simples sobre el cierre
+            mav=(9, 20),   # medias móviles simples
             volume=True,
-            title=f"{symbol} - últimas 24 velas ({timeframe})",
+            title=f"{symbol} - últimas 48 velas ({timeframe})",
             savefig=filepath,
         )
         plt.close("all")
     except Exception as e:
-        print(f"Error generando gráfico simple para {symbol}: {e}")
+        print(f"Error generando gráfico para {symbol}: {e}")
         raise
 
     return filepath
