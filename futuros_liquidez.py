@@ -186,6 +186,10 @@ ATR_PERIOD = 14
 ATR_SL_MULT = 1.5
 ATR_TP_MULT = 3.0
 
+# SL/TP PORCENTUAL (por defecto)
+SL_PCT = 0.05   # 5% de stop-loss
+TP_PCT = 0.10   # 10% de take-profit
+
 # PARÁMETROS DE GESTIÓN DE CAPITAL
 BALANCE_TEORICO = 50.0
 RIESGO_POR_OPERACION = 0.05    # 5% de riesgo por operación
@@ -286,6 +290,8 @@ BASE_TICKERS = markets_cfg.get("base_tickers", BASE_TICKERS)
 MIN_SCORE_FOR_ENTRY = strategy_cfg.get("min_score_for_entry", MIN_SCORE_FOR_ENTRY)
 ATR_SL_MULT = strategy_cfg.get("atr_sl_mult", ATR_SL_MULT)
 ATR_TP_MULT = strategy_cfg.get("atr_tp_mult", ATR_TP_MULT)
+SL_PCT = strategy_cfg.get("sl_pct", SL_PCT)
+TP_PCT = strategy_cfg.get("tp_pct", TP_PCT)
 
 # Intervalo general entre ciclos sobre todos los símbolos (segundos)
 UPDATE_INTERVAL = settings_cfg.get("update_interval", 30)
@@ -390,17 +396,15 @@ def generar_senal(ohlcv: list, last_signal: str) -> dict:
     elif bearish_score >= MIN_SCORE_FOR_ENTRY and bullish_score < MIN_SCORE_FOR_ENTRY:
         senal = "SHORT"
 
-    # 5. Calcular SL/TP basado en ATR (Usando 2x ATR para SL, 4x ATR para TP)
+    # 5. Calcular SL/TP basados en porcentaje del precio actual:
+    #    SL ~5% y TP ~10% (por defecto, configurables).
     if senal != "NO_TRADE":
-        atr_multiplier_sl = ATR_SL_MULT
-        atr_multiplier_tp = ATR_TP_MULT
-        
         if senal == "LONG":
-            stop_loss = last_close - (last_atr * atr_multiplier_sl)
-            take_profit = last_close + (last_atr * atr_multiplier_tp)
+            stop_loss = last_close * (1.0 - SL_PCT)
+            take_profit = last_close * (1.0 + TP_PCT)
         elif senal == "SHORT":
-            stop_loss = last_close + (last_atr * atr_multiplier_sl)
-            take_profit = last_close - (last_atr * atr_multiplier_tp)
+            stop_loss = last_close * (1.0 + SL_PCT)
+            take_profit = last_close * (1.0 - TP_PCT)
 
     # Devolver el resultado en el formato esperado
     return {
