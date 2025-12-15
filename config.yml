@@ -1,5 +1,5 @@
 settings:
-  timeframe: "1m"          # ahora mismo para pruebas
+  timeframe: "1h"          # ahora mismo para pruebas
   update_interval: 30
   max_slippage_pct: 0.05   # 5% de slippage máximo
   balance_teorico: 50.0
