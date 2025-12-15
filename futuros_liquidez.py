@@ -445,11 +445,12 @@ def calcular_posicion(precio_entrada, stop_loss):
 def crear_grafico_24h(symbol: str, ohlcv: list, timeframe: str) -> str:
     """
     Genera un gráfico de velas de las últimas 24 velas (incluida la actual si viene en OHLCV)
-    con EMAs, RSI y MACD, y lo guarda en disco. Devuelve la ruta al PNG.
+    con medias móviles simples y volumen, y lo guarda en disco. Devuelve la ruta al PNG.
     """
     if len(ohlcv) < 24:
         raise ValueError("No hay suficientes velas para generar el gráfico (mínimo 24).")
 
+    # DataFrame con todas las velas y nos quedamos solo con las últimas 24
     df = pd.DataFrame(
         ohlcv,
         columns=["timestamp", "open", "high", "low", "close", "volume"],
@@ -462,45 +463,26 @@ def crear_grafico_24h(symbol: str, ohlcv: list, timeframe: str) -> str:
     df_ohlc = df_24[["open", "high", "low", "close", "volume"]].copy()
     df_ohlc.columns = ["Open", "High", "Low", "Close", "Volume"]
 
-    closes = df_ohlc["Close"].astype(float).values
-
-    # Indicadores técnicos para el gráfico (mismos parámetros que la estrategia)
-    ema20 = talib.EMA(closes, timeperiod=20)
-    ema50 = talib.EMA(closes, timeperiod=50)
-    ema200 = talib.EMA(closes, timeperiod=200)
-    rsi = talib.RSI(closes, timeperiod=14)
-    macd, macdsignal, macdhist = talib.MACD(
-        closes, fastperiod=12, slowperiod=26, signalperiod=9
-    )
-
-    apds = [
-        mpf.make_addplot(ema20, panel=0),
-        mpf.make_addplot(ema50, panel=0),
-        mpf.make_addplot(ema200, panel=0),
-        mpf.make_addplot(rsi, panel=1),
-        mpf.make_addplot(macd, panel=2),
-        mpf.make_addplot(macdsignal, panel=2),
-        mpf.make_addplot(macdhist, type="bar", panel=2),
-    ]
-
     os.makedirs("charts", exist_ok=True)
-    filename = f"{symbol.replace('/', '_')}_{timeframe}_24h.png"
+    filename = f"{symbol.replace('/', '_').replace(':', '_')}_{timeframe}_24h.png"
     filepath = os.path.join("charts", filename)
 
     try:
         mpf.plot(
             df_ohlc,
             type="candle",
-            addplot=apds,
+            mav=(9, 20),          # medias móviles simples sobre el cierre
+            volume=True,
             title=f"{symbol} - últimas 24 velas ({timeframe})",
             savefig=filepath,
         )
         plt.close("all")
     except Exception as e:
-        print(f"Error generando gráfico para {symbol}: {e}")
+        print(f"Error generando gráfico simple para {symbol}: {e}")
         raise
 
     return filepath
+
 
 # ==================================
 # EXCHANGE / DATA / TELEGRAM / STATE
