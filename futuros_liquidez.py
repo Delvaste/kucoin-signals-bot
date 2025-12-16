@@ -304,127 +304,83 @@ UPDATE_INTERVAL = settings_cfg.get("update_interval", 30)
 
 def generar_senal(ohlcv: list, last_signal: str) -> dict:
     """
-    Genera la señal de trading basada en EMAs 20/50 y Estocástico (14, 3, 5) con un sistema de scoring.
-    También calcula SL/TP basado en porcentaje.
-    ohlcv debe tener al menos 200 velas.
+    Estrategia Optimizada 1H:
+    - Tendencia: Cruce de EMAs 20/50 + Filtro Institucional EMA 200.
+    - Volatilidad: ADX > 20 para evitar rangos laterales.
+    - Gatillo: Cruce de Estocástico (14,3,5).
+    - Salidas: ATR Dinámico (Ajustado por volatilidad).
     """
     if len(ohlcv) < 200:
         return {"senal": "NO_TRADE", "precio": 0, "stop_loss": 0, "take_profit": 0, "timestamp_candle": 0}
 
-    # 1. Preparar datos
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-
-    # Resumen de las últimas 24 velas (24h en TF 1h)
-    df_last_24 = df.tail(24)
-    change_24h_pct = (
-        (df_last_24["close"].iloc[-1] - df_last_24["close"].iloc[0])
-        / df_last_24["close"].iloc[0]
-        * 100.0
-    )
-    high_24h = df_last_24["high"].max()
-    low_24h = df_last_24["low"].min()
-
+    
     closes = df["close"].values
     highs = df["high"].values
     lows = df["low"].values
-    
-    # Valores de la última vela cerrada (entrada/referencia)
     last_close = closes[-1]
-    last_timestamp = ohlcv[-1][0] # Último timestamp de cierre
+    last_timestamp = ohlcv[-1][0]
 
-    # 2. Calcular Indicadores TÉCNICOS (EMA 20, 50 y Estocástico 14, 3, 5)
+    # 1. Indicadores Técnicos Avanzados
     ema_20 = talib.EMA(closes, timeperiod=20)
     ema_50 = talib.EMA(closes, timeperiod=50)
-    # MACD y RSI ELIMINADOS
+    ema_200 = talib.EMA(closes, timeperiod=200) # Filtro de tendencia mayor 
+    adx = talib.ADX(highs, lows, closes, timeperiod=14) # Filtro de fuerza 
+    atr = talib.ATR(highs, lows, closes, timeperiod=14) # Para SL/TP dinámico 
     
-    # Estocástico (Stochastic Oscillator: K=14, D=3, Slowing=5)
-    # La configuración que se ajusta a (K=14, Slowing=5, D=3) en TA-Lib es:
-    slowk, slowd = talib.STOCH(
-        highs, lows, closes, 
-        fastk_period=14, 
-        slowk_period=5, # Este es el Slowing de 5
-        slowd_period=3
-    )
+    slowk, slowd = talib.STOCH(highs, lows, closes, fastk_period=14, slowk_period=5, slowd_period=3)
 
-    # Calcular ATR para SL/TP (se mantiene el cálculo, aunque no se usa en la lógica de señal)
-    atr_vals = talib.ATR(highs, lows, closes, timeperiod=14)
-    # last_atr = atr_vals[-1] # No se usa
+    # Valores actuales
+    l_ema20, l_ema50, l_ema200 = ema_20[-1], ema_50[-1], ema_200[-1]
+    l_adx = adx[-1]
+    l_atr = atr[-1]
+    l_k, l_d = slowk[-1], slowd[-1]
+    p_k, p_d = slowk[-2], slowd[-2]
 
-    # Tomar los últimos valores de los indicadores (vela cerrada)
-    last_ema_20 = ema_20[-1]
-    last_ema_50 = ema_50[-1]
-    last_stoch_k = slowk[-1] # %K (Línea rápida del estocástico)
-    last_stoch_d = slowd[-1] # %D (Línea lenta o media móvil de %K)
-    
-    # Los valores penúltimos para detectar cruces de Estocástico
-    prev_stoch_k = slowk[-2]
-    prev_stoch_d = slowd[-2]
-    
-    # 3. Calcular la Puntuación (Scoring) de Señal
-    # Se inicializa el score a 0
     bullish_score = 0
     bearish_score = 0
 
-    # PUNTUACIÓN LONG (BULLISH)
-    # 1. Trend Filter: EMA 20 > EMA 50 (Tendencia Alcista)
-    if last_ema_20 > last_ema_50:
-        bullish_score += 40
-        
-    # 2. Entry Price: Cierre > EMA 20 (Por encima del precio medio rápido)
-    if last_close > last_ema_20:
-        bullish_score += 20
-        
-    # 3. Momentum: %K cruza %D al alza (Condición de entrada por Estocástico)
-    # Cruce al alza: %K anterior <= %D anterior Y %K actual > %D actual
-    if prev_stoch_k <= prev_stoch_d and last_stoch_k > last_stoch_d:
-        bullish_score += 40
-        
-    # PUNTUACIÓN SHORT (BEARISH)
-    # 1. Trend Filter: EMA 20 < EMA 50 (Tendencia Bajista)
-    if last_ema_20 < last_ema_50:
-        bearish_score += 40
-        
-    # 2. Entry Price: Cierre < EMA 20 (Por debajo del precio medio rápido)
-    if last_close < last_ema_20:
-        bearish_score += 20
-        
-    # 3. Momentum: %K cruza %D a la baja (Condición de entrada por Estocástico)
-    # Cruce a la baja: %K anterior >= %D anterior Y %K actual < %D actual
-    if prev_stoch_k >= prev_stoch_d and last_stoch_k < last_stoch_d:
-        bearish_score += 40
-        
-    # 4. Generar la Señal Final
+    # --- FILTRO DE VOLATILIDAD ---
+    # Si el ADX es bajo, el mercado está en rango (pérdidas seguras por señales falsas)
+    if l_adx < 20:
+        return {"senal": "NO_TRADE", "precio": last_close, "timestamp_candle": last_timestamp}
+
+    # --- PUNTUACIÓN LONG ---
+    if last_close > l_ema200 and l_ema20 > l_ema50:
+        bullish_score += 50
+    if p_k <= p_d and l_k > l_d: # Cruce alcista Estocástico 
+        bullish_score += 50
+
+    # --- PUNTUACIÓN SHORT ---
+    if last_close < l_ema200 and l_ema20 < l_ema50:
+        bearish_score += 50
+    if p_k >= p_d and l_k < l_d: # Cruce bajista Estocástico 
+        bearish_score += 50
+
+    # 2. Lógica de Señal
     senal = "NO_TRADE"
+    if bullish_score >= 100: senal = "LONG"
+    elif bearish_score >= 100: senal = "SHORT"
+
+    # 3. Gestión de Riesgo ATR Dinámico
+    # Usamos los multiplicadores configurados en config.yml 
     stop_loss = 0
     take_profit = 0
-    
-    # La nueva estrategia requiere un score MÍNIMO para entrar
-    if bullish_score >= MIN_SCORE_FOR_ENTRY and bearish_score < MIN_SCORE_FOR_ENTRY:
-        senal = "LONG"
-    elif bearish_score >= MIN_SCORE_FOR_ENTRY and bullish_score < MIN_SCORE_FOR_ENTRY:
-        senal = "SHORT"
-
-    # 5. Calcular SL/TP basados en porcentaje del precio actual:
-    #    SL ~5% y TP ~10% (por defecto, configurables).
     if senal != "NO_TRADE":
         if senal == "LONG":
-            stop_loss = last_close * (1.0 - SL_PCT)
-            take_profit = last_close * (1.0 + TP_PCT)
-        elif senal == "SHORT":
-            stop_loss = last_close * (1.0 + SL_PCT)
-            take_profit = last_close * (1.0 - TP_PCT)
+            stop_loss = last_close - (l_atr * ATR_SL_MULT)
+            take_profit = last_close + (l_atr * ATR_TP_MULT)
+        else:
+            stop_loss = last_close + (l_atr * ATR_SL_MULT)
+            take_profit = last_close - (l_atr * ATR_TP_MULT)
 
-    # Devolver el resultado en el formato esperado
     return {
         "senal": senal,
         "precio": last_close,
         "stop_loss": stop_loss,
         "take_profit": take_profit,
         "timestamp_candle": last_timestamp,
-        "change_24h_pct": float(change_24h_pct),
-        "high_24h": float(high_24h),
-        "low_24h": float(low_24h),
-        "debug_score": f"LONG:{bullish_score}, SHORT:{bearish_score}"  # DEBUG
+        "debug_score": f"ADX:{l_adx:.1f}, ATR_SL:{l_atr*ATR_SL_MULT:.4f}"
     }
 
 
