@@ -32,7 +32,6 @@ def load_config(path: Path = CONFIG_PATH) -> dict:
 
 CONFIG = load_config()
 
-# Parámetros desde Config
 TIMEFRAME = CONFIG.get("settings", {}).get("timeframe", "1h")
 UPDATE_INTERVAL = CONFIG.get("settings", {}).get("update_interval", 30)
 MIN_SCORE = CONFIG.get("strategy", {}).get("min_score_for_entry", 70)
@@ -54,7 +53,7 @@ def enviar_mensaje(texto: str, chart_path: str = None):
             
     requests.post(url + "sendMessage", data={'chat_id': TELEGRAM_CHAT_ID, 'text': texto, 'parse_mode': 'Markdown'})
 
-def generar_grafico(symbol: str, ohlcv: list, info: dict) -> str | None:
+def generar_grafico(symbol: str, ohlcv: list) -> str | None:
     try:
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
@@ -65,7 +64,7 @@ def generar_grafico(symbol: str, ohlcv: list, info: dict) -> str | None:
         df['k'], df['d'] = talib.STOCH(df['high'], df['low'], df['close'], 14, 5, 3)
         
         df_plot = df.tail(60).copy()
-        filename = f"chart_{symbol.replace('/', '_')}.png"
+        filename = f"chart_{symbol.replace('/', '_').replace(':', '_')}.png"
         
         aplots = [
             mpf.make_addplot(df_plot['ema20'], color='blue'),
@@ -77,7 +76,7 @@ def generar_grafico(symbol: str, ohlcv: list, info: dict) -> str | None:
         mpf.plot(df_plot, type='candle', addplot=aplots, savefig=filename, style='yahoo', figsize=(10, 7))
         return filename
     except Exception as e:
-        print(f"Error gráfico: {e}")
+        print(f"Error gráfico {symbol}: {e}")
         return None
 
 # --- ESTRATEGIA NEXTWAVE ---
@@ -93,7 +92,6 @@ def generar_senal(ohlcv: list) -> dict:
     score = 0
     razones = []
 
-    # Tendencia
     if last['close'] > last['ema20'] > last['ema50']:
         score += 50
         razones.append("🌊 Tendencia Alcista")
@@ -101,7 +99,6 @@ def generar_senal(ohlcv: list) -> dict:
         score -= 50
         razones.append("🌊 Tendencia Bajista")
 
-    # Momentum
     if last['adx'] > 20:
         if last['k'] < 25 and last['k'] > last['d']:
             score += 40
@@ -120,51 +117,76 @@ def generar_senal(ohlcv: list) -> dict:
 
 def main_loop():
     print("Iniciando Bot estilo NextWave...")
-    # CAMBIO CRÍTICO: Usamos 'kucoinfutures' en lugar de 'kucoin'
     exchange = ccxt.kucoinfutures({
         'apiKey': KUCOIN_API_KEY,
         'secret': KUCOIN_API_SECRET,
         'password': KUCOIN_API_PASSPHRASE,
+        'enableRateLimit': True
     })
-    
-    tickers = CONFIG.get("markets", {}).get("base_tickers", ["XRP", "ADA"])
+
+    # CARGA DE MERCADOS (Soluciona el error de BadSymbol)
+    try:
+        print("Cargando mercados de Kucoin Futures...")
+        exchange.load_markets()
+    except Exception as e:
+        print(f"Error crítico cargando mercados: {e}")
+        return
+
+    tickers_config = CONFIG.get("markets", {}).get("base_tickers", ["XRP", "ADA"])
     state = {}
 
     while True:
         try:
-            for symbol in tickers:
-                # CAMBIO CRÍTICO: Formato de símbolo para Kucoin Futuros
-                # ccxt traducirá "XRP/USDT:USDT" al formato interno de Kucoin automáticamente
-                full_symbol = f"{symbol}/USDT:USDT"
+            for base_symbol in tickers_config:
+                # Intentamos varios formatos comunes por si acaso
+                possible_symbols = [
+                    f"{base_symbol}/USDT:USDT",
+                    f"{base_symbol}USDTM",
+                    f"{base_symbol}USDT"
+                ]
                 
-                try:
-                    ohlcv = exchange.fetch_ohlcv(full_symbol, timeframe=TIMEFRAME, limit=100)
-                except Exception as e:
-                    print(f"Error cargando {full_symbol}: {e}")
+                full_symbol = None
+                for s in possible_symbols:
+                    if s in exchange.markets:
+                        full_symbol = s
+                        break
+                
+                if not full_symbol:
+                    print(f"Símbolo {base_symbol} no encontrado en Kucoin Futures. Saltando...")
                     continue
 
-                last_ts = ohlcv[-1][0]
-                symbol_state = state.get(symbol, {"ts": 0, "signal": "NO_TRADE"})
-
-                if last_ts > symbol_state["ts"]:
-                    info = generar_senal(ohlcv)
+                try:
+                    ohlcv = exchange.fetch_ohlcv(full_symbol, timeframe=TIMEFRAME, limit=100)
+                    if not ohlcv: continue
                     
-                    if info["senal"] != "NO_TRADE" and info["senal"] != symbol_state["signal"]:
-                        chart = generar_grafico(full_symbol, ohlcv, info)
-                        msg = (f"🌊 **NextWave: {info['senal']}**\n"
-                               f"🪙 {symbol} | 💰 {info['price']}\n"
-                               f"📊 Score: {info['score']}\n"
-                               f"📝 {', '.join(info['razones'])}")
-                        enviar_mensaje(msg, chart)
-                        symbol_state["signal"] = info["senal"]
+                    last_ts = ohlcv[-1][0]
+                    symbol_state = state.get(full_symbol, {"ts": 0, "signal": "NO_TRADE"})
 
-                    symbol_state["ts"] = last_ts
-                    state[symbol] = symbol_state
+                    if last_ts > symbol_state["ts"]:
+                        info = generar_senal(ohlcv)
+                        
+                        if info["senal"] != "NO_TRADE" and info["senal"] != symbol_state["signal"]:
+                            chart = generar_grafico(full_symbol, ohlcv)
+                            msg = (f"🌊 **NextWave: {info['senal']}**\n"
+                                   f"🪙 {full_symbol}\n"
+                                   f"💰 Precio: {info['price']}\n"
+                                   f"📊 Score: {info['score']}\n"
+                                   f"📝 {', '.join(info['razones'])}")
+                            enviar_mensaje(msg, chart)
+                            symbol_state["signal"] = info["senal"]
+
+                        symbol_state["ts"] = last_ts
+                        state[full_symbol] = symbol_state
                 
-                time.sleep(1)
+                except Exception as e:
+                    print(f"Error procesando {full_symbol}: {e}")
+                
+                time.sleep(1) # Respetar rate limit
+            
             time.sleep(UPDATE_INTERVAL)
+            
         except Exception as e:
-            print(f"Error Loop: {e}")
+            print(f"Error en loop: {e}")
             time.sleep(10)
 
 # --- FLASK ---
