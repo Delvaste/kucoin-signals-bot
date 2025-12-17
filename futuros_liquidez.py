@@ -21,7 +21,7 @@ import mplfinance as mpf
 # CONFIGURACIÓN
 # =======================
 
-# --- Variables de Entorno ---
+# --- Variables de Env ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 KUCOIN_API_KEY = os.getenv("KUCOIN_API_KEY")
@@ -30,904 +30,194 @@ KUCOIN_API_PASSPHRASE = os.getenv("KUCOIN_API_PASSPHRASE")
 
 CONFIG_PATH = Path("config.yml")
 
-
 def load_config(path: Path = CONFIG_PATH) -> dict:
-    """
-    Carga la configuración desde config.yml si existe.
-    Si no existe, devuelve un dict vacío y se usan los defaults del código.
-    """
     if not path.exists():
         return {}
     with path.open("r", encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
 
-
 CONFIG = load_config()
 
-# Timeframe -> 1H (Confirmado) (valor por defecto, se puede sobreescribir por config.yml)
-TIMEFRAME = "1h"
+# Parámetros Base
+TIMEFRAME = CONFIG.get("settings", {}).get("timeframe", "1h")
+UPDATE_INTERVAL = CONFIG.get("settings", {}).get("update_interval", 30)
+MAX_SLIPPAGE_PCT = CONFIG.get("settings", {}).get("max_slippage_pct", 0.005)
+MIN_SCORE = CONFIG.get("strategy", {}).get("min_score_for_entry", 70)
 
-# Slippage máximo permitido (0.5% = 0.005)
-MAX_SLIPPAGE_PCT = 0.005
+# --- FUNCIONES DE TELEGRAM ---
 
-# Zona horaria para los gráficos (por defecto UTC, se sobrescribe con config.yml)
-TIMEZONE = "UTC"
-# Lista de ALTCOINS (ACTUALIZADA: < $5 USD, Alta Liquidez en Futuros, Timeframe 1h)
-BASE_TICKERS = [
-    "XRP", "ADA", "NEAR", "WLD", "FIL", "ARB", "OP", "SUI", "SEI", 
-    "DOGE", "TRX", "XLM", "FTM", "TIA", "MINA", "MANA", "SAND", 
-    "GALA", "CHZ", "SHIB", "FLOKI", 
-    "LDO", "WIF", "PEPE", "HBAR" # Nuevas adiciones estratégicas
-]
-
-# Fichero para guardar el estado por símbolo real de futures (ej. "XRP/USDT:USDT")
-STATE_FILE = Path("state_kucoin_signals.json")
-SUMMARY_FILE = Path("daily_summary.json")
-
-
-def _cargar_resumen_diario():
-    """
-    Carga el estado del resumen diario desde disco.
-    Estructura:
-    {
-      "last_summary_date": "YYYY-MM-DD" | "",
-      "predicciones": [
-          {"symbol": "XRP/USDT:USDT", "side": "LONG", "entry_price": 0.0, "timeframe": "1h"}
-      ]
-    }
-    """
-    if SUMMARY_FILE.exists():
+def enviar_mensaje(texto: str, chart_path: str = None):
+    """Envía un mensaje o una foto (con caption) a Telegram."""
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/"
+    
+    if chart_path and Path(chart_path).exists():
+        send_photo_url = url + "sendPhoto"
         try:
-            with SUMMARY_FILE.open("r", encoding="utf-8") as f:
-                data = json.load(f)
-        except Exception:
-            data = {}
-    else:
-        data = {}
-
-    if "last_summary_date" not in data:
-        data["last_summary_date"] = ""
-    if "predicciones" not in data:
-        data["predicciones"] = []
-    return data
-
-
-def _guardar_resumen_diario(data: dict):
-    try:
-        with SUMMARY_FILE.open("w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"Error guardando resumen diario: {e}")
-
-
-def registrar_prediccion(symbol_real: str, side: str, entry_price: float, timeframe: str):
-    """
-    Registra una nueva predicción para el resumen diario.
-    symbol_real: símbolo tal y como lo usa el exchange (ej. 'XRP/USDT:USDT').
-    side: 'LONG' o 'SHORT'.
-    entry_price: precio de entrada recomendado.
-    """
-    data = _cargar_resumen_diario()
-    data["predicciones"].append(
-        {
-            "symbol": symbol_real,
-            "side": side,
-            "entry_price": float(entry_price),
-            "timeframe": timeframe,
-        }
-    )
-    _guardar_resumen_diario(data)
-
-
-def intentar_enviar_resumen_diario(exchange):
-    """
-    Si son las ~00:00 y aún no se ha enviado el resumen de hoy, calcula y envía
-    un resumen de las predicciones de las últimas 24h.
-    """
-    now = datetime.now()  # se asume timezone del servidor
-    hoy_str = now.strftime("%Y-%m-%d")
-
-    data = _cargar_resumen_diario()
-    last_summary = data.get("last_summary_date", "")
-    predicciones = data.get("predicciones", [])
-
-    # Nada que resumir
-    if not predicciones:
-        return
-
-    # Solo enviamos si estamos en la hora 0 y aún no hemos enviado el resumen hoy
-    if now.hour != 0 or last_summary == hoy_str:
-        return
-
-    lineas = ["📈 Ganancias en las últimas 24 horas:\n"]
-
-    for pred in predicciones:
-        symbol = pred["symbol"]
-        side = pred["side"]
-        entry_price = float(pred["entry_price"])
-
-        try:
-            ticker = exchange.fetch_ticker(symbol)
-            current_price = float(ticker.get("last") or ticker.get("close") or entry_price)
+            with open(chart_path, 'rb') as f:
+                response = requests.post(
+                    send_photo_url,
+                    data={'chat_id': TELEGRAM_CHAT_ID, 'caption': texto, 'parse_mode': 'Markdown'},
+                    files={'photo': f}
+                )
+            os.remove(chart_path) # Limpiar archivo local
+            response.raise_for_status()
+            return response.json()
         except Exception as e:
-            print(f"No se pudo obtener precio actual para {symbol}: {e}")
-            current_price = entry_price
+            print(f"Error enviando foto: {e}")
+            
+    send_text_url = url + "sendMessage"
+    try:
+        response = requests.post(send_text_url, data={'chat_id': TELEGRAM_CHAT_ID, 'text': texto, 'parse_mode': 'Markdown'})
+        return response.json()
+    except Exception as e:
+        print(f"Error enviando texto: {e}")
+        return None
 
-        if entry_price <= 0:
-            perf_pct = 0.0
-        else:
-            if side == "LONG":
-                perf_pct = (current_price - entry_price) / entry_price * 100.0
-            else:  # SHORT
-                perf_pct = (entry_price - current_price) / entry_price * 100.0
+# --- FUNCIÓN DE GRÁFICO ---
 
-        emoji = "🟢" if perf_pct >= 0 else "🚫"
+def generar_grafico(symbol: str, ohlcv: list, info: dict) -> str | None:
+    """Genera un gráfico actualizado estilo NextWave."""
+    try:
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df.set_index('timestamp', inplace=True)
+        
+        # Indicadores para el gráfico
+        df['ema20'] = talib.EMA(df['close'], timeperiod=20)
+        df['ema50'] = talib.EMA(df['close'], timeperiod=50)
+        df['slowk'], df['slowd'] = talib.STOCH(df['high'], df['low'], df['close'], 
+                                             fastk_period=14, slowk_period=5, slowd_period=3)
+        
+        df_plot = df.tail(60).copy()
+        mc = mpf.make_marketcolors(up='g', down='r', inherit=True)
+        s = mpf.make_mpf_style(base_mpf_style='yahoo', marketcolors=mc)
 
-        # Nombre corto tipo SOLUSDT, TIAUSDT...
-        short_name = symbol.replace("/", "").replace(":", "")
+        add_plots = [
+            mpf.make_addplot(df_plot['ema20'], color='blue', panel=0),
+            mpf.make_addplot(df_plot['ema50'], color='orange', panel=0),
+            mpf.make_addplot(df_plot['slowk'], color='purple', panel=2, title='NextWave Stoch'),
+            mpf.make_addplot(df_plot['slowd'], color='red', panel=2)
+        ]
+        
+        filename = f"chart_{symbol.replace('/', '_')}.png"
+        mpf.plot(df_plot, type='candle', style=s, addplot=add_plots, savefig=filename, volume=True, figsize=(10, 7))
+        return filename
+    except Exception as e:
+        print(f"Error gráfico: {e}")
+        return None
 
-        lineas.append(f"{short_name:<10}: {perf_pct:+.2f}% {emoji}")
-
-    resumen = "\n".join(lineas)
-
-    # Enviamos resumen (sin aviso legal, como pediste)
-    enviar_mensaje(resumen)
-
-    # Marcamos que ya hemos enviado el resumen de hoy y vaciamos predicciones
-    data["last_summary_date"] = hoy_str
-    data["predicciones"] = []
-    _guardar_resumen_diario(data)
-
-# ==================================
-# PARÁMETROS DE LA ESTRATEGIA
-# ==================================
-# NOTA: Los siguientes se mantienen aunque no se usen para no romper la compatibilidad
-# con el resto del código, pero la estrategia de scoring ya no los usa.
-EMA_RAPIDA_PERIOD = 9
-EMA_LENTA_PERIOD = 21
-EMA_TENDENCIA_PERIOD = 100  # Filtro de tendencia
-ATR_PERIOD = 14
-ATR_SL_MULT = 1.5
-ATR_TP_MULT = 3.0
-
-# SL/TP PORCENTUAL (por defecto)
-SL_PCT = 0.05   # 5% de stop-loss
-TP_PCT = 0.10   # 10% de take-profit
-
-# Nº de velas que queremos mostrar en el gráfico (contexto visual)
-NUM_CANDLES_CHART = 120  # ~5 días en TF 1h, ~2 horas en TF 1m
-
-# PARÁMETROS DE GESTIÓN DE CAPITAL
-BALANCE_TEORICO = 50.0
-RIESGO_POR_OPERACION = 0.05    # 5% de riesgo por operación
-APALANCAMIENTO_FIJO = 10       # Apalancamiento deseado (x10)
-
-
-# ==================================
-# FUNCIONES DE INDICADORES (SIN CAMBIOS)
-# ==================================
-
-def ema(values, period):
-    values = list(values)
-    if not values:
-        return []
-
-    k = 2 / (period + 1)
-    ema_vals = []
-
-    ema_prev = values[0]
-    ema_vals.append(ema_prev)
-
-    for i in range(1, len(values)):
-        v = values[i]
-        ema_prev = v * k + ema_prev * (1 - k)
-        ema_vals.append(ema_prev)
-
-    return ema_vals
-
-
-def tr(high, low, close_prev):
-    # ... (Código de TR)
-    r1 = high - low
-    r2 = abs(high - close_prev)
-    r3 = abs(low - close_prev)
-    return max(r1, r2, r3)
-
-
-def atr(ohlcv, period=ATR_PERIOD):
-    # ... (Código de ATR)
-    if len(ohlcv) < 2:
-        return []
-
-    trs = []
-    for i in range(1, len(ohlcv)):
-        high = ohlcv[i][2]
-        low = ohlcv[i][3]
-        close_prev = ohlcv[i - 1][4]
-        trs.append(tr(high, low, close_prev))
-
-    if len(trs) < period:
-        return [0.0] * len(ohlcv)
-
-    initial_atr = sum(trs[:period]) / period
-
-    atr_vals = [0.0] * period
-    atr_vals.append(initial_atr)
-
-    atr_prev = initial_atr
-
-    for i in range(period, len(trs)):
-        atr_prev = (atr_prev * (period - 1) + trs[i]) / period
-        atr_vals.append(atr_prev)
-
-    if len(atr_vals) < len(ohlcv):
-        atr_vals.extend([atr_prev] * (len(ohlcv) - len(atr_vals)))
-    elif len(atr_vals) > len(ohlcv):
-        atr_vals = atr_vals[:len(ohlcv)]
-
-    return atr_vals
-
-
-# ==================================
-# FUNCIÓN DE SEÑALES (ESTRATEGIA AVANZADA - SWAP)
-# ==================================
-
-# --- PARÁMETROS DE LA NUEVA ESTRATEGIA (Ajustables) ---
-MIN_SCORE_FOR_ENTRY = 70
-# -----------------------------------------------------
-
-# ================================
-# OVERRIDE DE PARÁMETROS POR CONFIG
-# ================================
-settings_cfg = CONFIG.get("settings", {})
-markets_cfg = CONFIG.get("markets", {})
-strategy_cfg = CONFIG.get("strategy", {})
-
-# SETTINGS
-TIMEFRAME = settings_cfg.get("timeframe", TIMEFRAME)
-MAX_SLIPPAGE_PCT = settings_cfg.get("max_slippage_pct", MAX_SLIPPAGE_PCT)
-TIMEZONE = settings_cfg.get("timezone", TIMEZONE)
-BALANCE_TEORICO = settings_cfg.get("balance_teorico", BALANCE_TEORICO)
-RIESGO_POR_OPERACION = settings_cfg.get("riesgo_por_operacion", RIESGO_POR_OPERACION)
-APALANCAMIENTO_FIJO = settings_cfg.get("apalancamiento", APALANCAMIENTO_FIJO)
-BASE_TICKERS = markets_cfg.get("base_tickers", BASE_TICKERS)
-
-# ESTRATEGIA
-MIN_SCORE_FOR_ENTRY = strategy_cfg.get("min_score_for_entry", MIN_SCORE_FOR_ENTRY)
-ATR_SL_MULT = strategy_cfg.get("atr_sl_mult", ATR_SL_MULT)
-ATR_TP_MULT = strategy_cfg.get("atr_tp_mult", ATR_TP_MULT)
-SL_PCT = strategy_cfg.get("sl_pct", SL_PCT)
-TP_PCT = strategy_cfg.get("tp_pct", TP_PCT)
-
-# Intervalo general entre ciclos sobre todos los símbolos (segundos)
-UPDATE_INTERVAL = settings_cfg.get("update_interval", 30)
+# --- LÓGICA DE ESTRATEGIA NEXTWAVE ---
 
 def generar_senal(ohlcv: list, last_signal: str) -> dict:
-    """
-    Estrategia Optimizada 1H:
-    - Tendencia: Cruce de EMAs 20/50 + Filtro Institucional EMA 200.
-    - Volatilidad: ADX > 20 para evitar rangos laterales.
-    - Gatillo: Cruce de Estocástico (14,3,5).
-    - Salidas: ATR Dinámico (Ajustado por volatilidad).
-    """
-    if len(ohlcv) < 200:
-        return {"senal": "NO_TRADE", "precio": 0, "stop_loss": 0, "take_profit": 0, "timestamp_candle": 0}
-
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     
-    closes = df["close"].values
-    highs = df["high"].values
-    lows = df["low"].values
-    last_close = closes[-1]
-    last_timestamp = ohlcv[-1][0]
-
-    # 1. Indicadores Técnicos Avanzados
-    ema_20 = talib.EMA(closes, timeperiod=20)
-    ema_50 = talib.EMA(closes, timeperiod=50)
-    ema_200 = talib.EMA(closes, timeperiod=200) # Filtro de tendencia mayor 
-    adx = talib.ADX(highs, lows, closes, timeperiod=14) # Filtro de fuerza 
-    atr = talib.ATR(highs, lows, closes, timeperiod=14) # Para SL/TP dinámico 
+    # Indicadores NextWave
+    df['ema_rapida'] = talib.EMA(df['close'], timeperiod=20)
+    df['ema_lenta'] = talib.EMA(df['close'], timeperiod=50)
+    df['adx'] = talib.ADX(df['high'], df['low'], df['close'], timeperiod=14)
+    df['slowk'], df['slowd'] = talib.STOCH(df['high'], df['low'], df['close'], 
+                                         fastk_period=14, slowk_period=5, slowd_period=3)
     
-    slowk, slowd = talib.STOCH(highs, lows, closes, fastk_period=14, slowk_period=5, slowd_period=3)
+    last_row = df.iloc[-1]
+    close = last_row['close']
+    ema20 = last_row['ema_rapida']
+    ema50 = last_row['ema_lenta']
+    k, d = last_row['slowk'], last_row['slowd']
+    adx = last_row['adx']
 
-    # Valores actuales
-    l_ema20, l_ema50, l_ema200 = ema_20[-1], ema_50[-1], ema_200[-1]
-    l_adx = adx[-1]
-    l_atr = atr[-1]
-    l_k, l_d = slowk[-1], slowd[-1]
-    p_k, p_d = slowk[-2], slowd[-2]
+    score = 0
+    razones = []
 
-    bullish_score = 0
-    bearish_score = 0
+    # 1. Filtro de Tendencia (Ola principal)
+    if close > ema20 > ema50:
+        score += 50
+        razones.append("🌊 Ola Alcista Confirmada")
+    elif close < ema20 < ema50:
+        score -= 50
+        razones.append("🌊 Ola Bajista Confirmada")
 
-    # --- FILTRO DE VOLATILIDAD ---
-    # Si el ADX es bajo, el mercado está en rango (pérdidas seguras por señales falsas)
-    if l_adx < 20:
-        return {"senal": "NO_TRADE", "precio": last_close, "timestamp_candle": last_timestamp}
-
-    # --- PUNTUACIÓN LONG ---
-    if last_close > l_ema200 and l_ema20 > l_ema50:
-        bullish_score += 50
-    if p_k <= p_d and l_k > l_d: # Cruce alcista Estocástico 
-        bullish_score += 50
-
-    # --- PUNTUACIÓN SHORT ---
-    if last_close < l_ema200 and l_ema20 < l_ema50:
-        bearish_score += 50
-    if p_k >= p_d and l_k < l_d: # Cruce bajista Estocástico 
-        bearish_score += 50
-
-    # 2. Lógica de Señal
+    # 2. Impulso y Fuerza (Stoch + ADX)
+    if adx > 20:
+        if k < 25 and k > d:
+            score += 40
+            razones.append("🚀 Impulso: Cruce K>D en Sobreventa")
+        elif k > 75 and k < d:
+            score -= 40
+            razones.append("🔻 Impulso: Cruce K<D en Sobrecompra")
+    
+    # Determinar señal final
     senal = "NO_TRADE"
-    if bullish_score >= 100: senal = "LONG"
-    elif bearish_score >= 100: senal = "SHORT"
-
-    # 3. Gestión de Riesgo ATR Dinámico
-    # Usamos los multiplicadores configurados en config.yml 
-    stop_loss = 0
-    take_profit = 0
-    if senal != "NO_TRADE":
-        if senal == "LONG":
-            stop_loss = last_close - (l_atr * ATR_SL_MULT)
-            take_profit = last_close + (l_atr * ATR_TP_MULT)
-        else:
-            stop_loss = last_close + (l_atr * ATR_SL_MULT)
-            take_profit = last_close - (l_atr * ATR_TP_MULT)
+    if score >= MIN_SCORE: senal = "LONG"
+    elif score <= -MIN_SCORE: senal = "SHORT"
 
     return {
         "senal": senal,
-        "precio": last_close,
-        "stop_loss": stop_loss,
-        "take_profit": take_profit,
-        "timestamp_candle": last_timestamp,
-        "debug_score": f"ADX:{l_adx:.1f}, ATR_SL:{l_atr*ATR_SL_MULT:.4f}"
+        "score": score,
+        "razones": razones,
+        "precio_entrada": close,
+        "stop_loss": close * 0.95 if senal == "LONG" else close * 1.05,
+        "take_profit": close * 1.10 if senal == "LONG" else close * 0.90
     }
 
+# --- CÁLCULO DE POSICIÓN ---
 
-# ==================================
-# GESTIÓN DE RIESGO (SIN CAMBIOS)
-# ==================================
+def calcular_posicion(precio_entrada: float, stop_loss: float) -> tuple[float, float]:
+    balance = CONFIG.get("settings", {}).get("balance_teorico", 100)
+    riesgo_pct = CONFIG.get("settings", {}).get("riesgo_por_operacion", 0.05)
+    distancia = abs(precio_entrada - stop_loss) / precio_entrada
+    if distancia == 0: return 0, 0
+    tamano_posicion = (balance * riesgo_pct) / distancia
+    return round(tamano_posicion, 2), round(balance * riesgo_pct, 2)
 
-def calcular_posicion(precio_entrada, stop_loss):
-    """
-    Calcula el tamaño de la posición basado en un riesgo fijo (5% del balance).
-    """
-    balance = BALANCE_TEORICO
-    riesgo_dolares = balance * RIESGO_POR_OPERACION  # 5% de $50 = $2.50
-
-    if not stop_loss:
-        return 0, riesgo_dolares
-
-    distancia = abs(precio_entrada - stop_loss)
-    if distancia == 0:
-        return 0, riesgo_dolares
-
-    tamaño = riesgo_dolares / distancia  # tamaño en unidades del activo
-    return tamaño, riesgo_dolares
-
-
-def crear_grafico_24h(symbol: str, ohlcv: list, timeframe: str) -> str:
-    """
-    Genera un gráfico tipo "trading spot":
-    - Velas (últimas NUM_CANDLES_CHART).
-    - EMAs 20 / 50.
-    - Estocástico K(14), D(3), Slowing(5) en panel inferior.
-    - Volumen en panel intermedio.
-    Devuelve la ruta al PNG.
-    """
-    if len(ohlcv) < 60:
-        raise ValueError("No hay suficientes velas para generar el gráfico (mínimo 60).")
-
-    # DataFrame con TODAS las velas recibidas
-    df = pd.DataFrame(
-        ohlcv,
-        columns=["timestamp", "open", "high", "low", "close", "volume"],
-    )
-
-    # Aseguramos que están ordenadas por timestamp
-    df = df.sort_values("timestamp")
-
-    # Nos quedamos solo con las últimas N velas (o las que haya)
-    n = min(NUM_CANDLES_CHART, len(df))
-    df_tail = df.tail(n).copy()
-
-    # Convertimos a datetime en UTC y luego a la zona horaria configurada
-    dt = pd.to_datetime(df_tail["timestamp"], unit="ms", utc=True)
-    if TIMEZONE and TIMEZONE != "UTC":
-        try:
-            dt = dt.dt.tz_convert(TIMEZONE)
-        except Exception as e:
-            print(f"No se pudo aplicar timezone {TIMEZONE}, usando UTC. Error: {e}")
-    df_tail["datetime"] = dt
-    df_tail.set_index("datetime", inplace=True)
-
-    # DataFrame en el formato que espera mplfinance
-    df_ohlc = df_tail[["open", "high", "low", "close", "volume"]].copy()
-    df_ohlc.columns = ["Open", "High", "Low", "Close", "Volume"]
-
-    # Si por cualquier motivo las columnas principales están vacías -> abortar
-    if df_ohlc[["Open", "High", "Low", "Close"]].dropna().empty:
-        raise ValueError("No hay datos OHLC válidos para graficar.")
-
-    # Cálculo de indicadores sobre el tramo que vamos a graficar
-    closes = df_ohlc["Close"].astype(float).values
-    highs = df_ohlc["High"].astype(float).values
-    lows = df_ohlc["Low"].astype(float).values
-
-
-    if len(closes) < 20:
-        raise ValueError("No hay suficientes velas para EMAs/Estocástico (mínimo 20).")
-
-    try:
-        # EMAs 20 y 50
-        ema20_arr = talib.EMA(closes, timeperiod=20)
-        ema50_arr = talib.EMA(closes, timeperiod=50)
-        # EMA200 y BBANDS ELIMINADOS
-        
-        # Estocástico (Stochastic Oscillator: K=14, D=3, Slowing=5)
-        slowk_arr, slowd_arr = talib.STOCH(
-            highs, lows, closes, 
-            fastk_period=14, 
-            slowk_period=5, # Este es el Slowing de 5
-            slowd_period=3
-        )
-        
-    except Exception as e_ind:
-        print(f"Error calculando EMAs/Stoch para {symbol}: {e_ind}")
-        # Si fallan los indicadores, graficamos solo velas + volumen
-        ema20_arr = ema50_arr = slowk_arr = slowd_arr = None
-
-    # Convertimos a Series alineadas con el índice
-    if ema20_arr is not None:
-        ema20 = pd.Series(ema20_arr, index=df_ohlc.index)
-        ema50 = pd.Series(ema50_arr, index=df_ohlc.index)
-        stoch_k = pd.Series(slowk_arr, index=df_ohlc.index)
-        stoch_d = pd.Series(slowd_arr, index=df_ohlc.index)
-    else:
-        ema20 = ema50 = stoch_k = stoch_d = None
-
-    # Log para ver el rango temporal que se está graficando
-    try:
-        print(
-            f"Gráfico {symbol}: desde {df_ohlc.index[0]} hasta {df_ohlc.index[-1]} "
-            f"(TIMEFRAME={timeframe}, TIMEZONE={TIMEZONE})"
-        )
-    except Exception:
-        pass
-
-    os.makedirs("charts", exist_ok=True)
-    filename = f"{symbol.replace('/', '_').replace(':', '_')}_{timeframe}_chart.png"
-    filepath = os.path.join("charts", filename)
-
-    # Estilo tipo "tradingview" oscuro
-    mc = mpf.make_marketcolors(
-        up="#26a69a",        # velas alcistas
-        down="#ef5350",      # velas bajistas
-        edge="inherit",
-        wick="inherit",
-        volume="in",
-    )
-    style = mpf.make_mpf_style(
-        base_mpf_style="nightclouds",
-        marketcolors=mc,
-        gridstyle=":",
-        facecolor="#0b0e11",
-        edgecolor="#0b0e11",
-        figcolor="#0b0e11",
-    )
-
-    # Helper para crear addplots solo si hay datos finitos
-    def _safe_addplot(series, color, width=1, panel=0, **kwargs):
-        if series is None:
-            return None
-        vals = np.asarray(series.values, dtype=float)
-        if not np.isfinite(vals).any():
-            return None
-        return mpf.make_addplot(series, color=color, width=width, panel=panel, **kwargs)
-
-    apds = []
-    
-    # EMAs 20 y 50 (Panel 0 - Precios)
-    ap_ema20 = _safe_addplot(ema20, "#00e5ff", 1, panel=0)
-    ap_ema50 = _safe_addplot(ema50, "#ffeb3b", 1, panel=0)
-    
-    # Estocástico K y D (Panel 1 - Debajo del volumen)
-    # Nota: El volumen es el panel por defecto (panel=0) si no se especifica
-    # o si se usa el `volume=True`. El panel de volumen se cuenta como panel 1
-    # si usamos `panel_ratios`. Vamos a usar panel_ratios=(6, 3, 3) para Vela/Vol/Stoch
-    ap_stoch_k = _safe_addplot(stoch_k, "#00e5ff", 1, panel=2) # Panel 2 = 3er panel
-    ap_stoch_d = _safe_addplot(stoch_d, "#ffeb3b", 1, panel=2)
-    
-    # Líneas de sobrecompra/sobreventa para Estocástico
-    hlines_stoch_overbought = mpf.make_addplot(
-        pd.Series([80.0] * len(df_ohlc), index=df_ohlc.index), 
-        panel=2, color="red", secondary_y=False, linestyle="--", width=0.7
-    )
-    hlines_stoch_oversold = mpf.make_addplot(
-        pd.Series([20.0] * len(df_ohlc), index=df_ohlc.index), 
-        panel=2, color="green", secondary_y=False, linestyle="--", width=0.7
-    )
-
-    # Agregamos los addplots al contenedor
-    for ap in (ap_ema20, ap_ema50, ap_stoch_k, ap_stoch_d, hlines_stoch_overbought, hlines_stoch_oversold):
-        if ap is not None:
-            apds.append(ap)
-
-    try:
-        mpf.plot(
-            df_ohlc,
-            type="candle",
-            style=style,
-            addplot=apds if apds else None,
-            volume=True,
-            panel_ratios=(6, 1, 3), # Vela (6), Volumen (1), Estocástico (3)
-            ylabel="Price",
-            ylabel_lower="Volume",
-            title=f"{symbol} - Señales de Trading ({timeframe})",
-            tight_layout=True,
-            savefig=filepath,
-        )
-        plt.close("all")
-    except Exception as e:
-        print(f"Error generando gráfico para {symbol}: {e}")
-        raise
-
-    return filepath
-
-
-
-# ==================================
-# EXCHANGE / DATA / TELEGRAM / STATE
-# ==================================
-
-def get_exchange():
-    exchange = ccxt.kucoinfutures({
-        "apiKey": KUCOIN_API_KEY,
-        "secret": KUCOIN_API_SECRET,
-        "password": KUCOIN_API_PASSPHRASE,
-        "enableRateLimit": True,
-    })
-    return exchange
-
-
-def build_symbol_map(exchange, base_tickers):
-    """
-    Mapea cada base (XRP, ADA, etc.) al símbolo real de futuros USDT-M en CCXT.
-    """
-    markets = exchange.load_markets()
-    symbol_map = {}
-
-    alias = {
-        "1000SHIB": "SHIB",
-        "1000PEPE": "PEPE", # Añadido alias para el nuevo ticker PEPE
-    }
-
-    for m in markets.values():
-        if not m.get("future", False) and m.get("type") != "swap":
-            continue
-        if not m.get("linear", False):
-            continue
-        if m.get("quote") not in ("USDT", "USDC"):
-            continue
-
-        base_ccxt = m.get("base")
-        base_normalizada = alias.get(base_ccxt, base_ccxt)
-
-        if base_normalizada in base_tickers and base_normalizada not in symbol_map:
-            symbol_map[base_normalizada] = m["symbol"]
-
-    print("Mapa de símbolos detectado:")
-    for b, s in symbol_map.items():
-        print(f"  {b} -> {s}")
-
-    return symbol_map
-
-
-def get_ohlcv(exchange, symbol, limit=300):
-    return exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=limit)
-
-
-def enviar_mensaje(texto: str):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": texto,
-    }
-    try:
-        r = requests.post(url, json=payload, timeout=10)
-        print("Respuesta Telegram:", r.status_code, r.text)
-        r.raise_for_status()
-    except Exception as e:
-        print("Error enviando mensaje a Telegram:", e)
-
-
-def enviar_imagen(ruta_imagen: str, caption: str = ""):
-    """
-    Envía una imagen a Telegram como foto, con un caption opcional.
-    """
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("Faltan TELEGRAM_BOT_TOKEN o TELEGRAM_CHAT_ID, no se envía la imagen.")
-        return
-
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-    try:
-        with open(ruta_imagen, "rb") as f:
-            files = {"photo": f}
-            data = {"chat_id": TELEGRAM_CHAT_ID, "caption": caption}
-            r = requests.post(url, data=data, files=files, timeout=20)
-            print("Respuesta Telegram (imagen):", r.status_code, r.text)
-            r.raise_for_status()
-    except Exception as e:
-        print("Error enviando imagen a Telegram:", e)
-
-def cargar_state():
-    if STATE_FILE.exists():
-        try:
-            return json.loads(STATE_FILE.read_text())
-        except Exception:
-            return {}
-    return {}
-
-
-def guardar_state(state):
-    try:
-        STATE_FILE.write_text(json.dumps(state))
-    except Exception as e:
-        print(f"No se pudo guardar estado: {e}")
-
-
-# ==================================
-# LOOP PRINCIPAL
-# ==================================
+# --- BUCLE PRINCIPAL ---
 
 def main_loop():
-    # Carga inicial de estado y conexión
-    state = cargar_state()
-    exchange = get_exchange()
-    symbol_map = build_symbol_map(exchange, BASE_TICKERS)
+    print("Iniciando Bot estilo NextWave...")
+    tickers = CONFIG.get("markets", {}).get("base_tickers", ["XRP", "ADA"])
+    exchange = ccxt.kucoin()
+    state = {}
 
-    if not symbol_map:
-        print("No se encontraron símbolos de futuros para las bases especificadas.")
-        return
-
-    print("Iniciando loop principal...")
     while True:
-        # Intentar enviar el resumen diario alrededor de las 00:00
-        intentar_enviar_resumen_diario(exchange)
-
         try:
-            for base in BASE_TICKERS:
-                symbol = symbol_map.get(base)
-                if not symbol:
-                    continue
-
-                # --- INICIALIZACIÓN POR SÍMBOLO ---
-                sym_state = state.get(symbol, {"last_candle_ts": 0, "last_signal": "NO_TRADE"})
-                last_signal = sym_state.get("last_signal", "NO_TRADE")
-                last_candle_ts = sym_state.get("last_candle_ts", 0)
-
-                new_last_signal = last_signal
-                new_last_candle_ts = last_candle_ts
-
-                try:
-                    print(f"\n--- Procesando {base} ({symbol}) ---")
-                    ohlcv = get_ohlcv(exchange, symbol, limit=300)
-                    if not ohlcv:
-                        print("No se han recibido datos OHLCV para", symbol)
-                        continue
-
-                    # Generar señal
-                    info = generar_senal(ohlcv, last_signal)
-                    senal = info.get("senal", "NO_TRADE")
-                    ts_candle = info.get("timestamp_candle")
-                    # Los campos cruce_alcista/bajista ya no se calculan en generar_senal, se dejan por compatibilidad
-                    cruce_alcista = False
-                    cruce_bajista = False 
-
-                    if ts_candle is None:
-                        print("No hay timestamp en la señal. Info:", info)
-                        continue
-
-                    # --- LÓGICA DE NUEVA VELA ---
-                    if ts_candle > last_candle_ts:
-                        print(f"Vela nueva en {symbol}. Señal entrada: {senal}, last_signal: {last_signal}")
-                        new_last_candle_ts = ts_candle
-
-                        # 1) SALIDA TRAILING POR CRUCE EMA (se mantiene la estructura pero ahora no se dispara)
-                        # El código no calcula los campos "cruce_*" ni las EMAs que usa esta lógica de salida
-                        if last_signal == "LONG" and cruce_bajista:
-                            mensaje_salida = (
-                                f"SALIDA LONG (Trailing EMA)\n"
-                                f"Par: {symbol}\n"
-                                f"Timeframe: {TIMEFRAME}\n\n"
-                                f"Motivo: Cruce de EMA de salida.\n"
-                                f"⚠️ Aviso: Este mensaje es solo información y NO constituye recomendación de inversión."
-                            )
-                            enviar_mensaje(mensaje_salida)
-                            new_last_signal = "NO_TRADE"
-
-                        elif last_signal == "SHORT" and cruce_alcista:
-                            mensaje_salida = (
-                                f"SALIDA SHORT (Trailing EMA)\n"
-                                f"Par: {symbol}\n"
-                                f"Timeframe: {TIMEFRAME}\n\n"
-                                f"Motivo: Cruce de EMA de salida.\n"
-                                f"⚠️ Aviso: Este mensaje es solo información y NO constituye recomendación de inversión."
-                            )
-                            enviar_mensaje(mensaje_salida)
-                            new_last_signal = "NO_TRADE"
-
-                        # 2) ENTRADA NUEVA
-                        stop_loss = info.get("stop_loss")
-                        take_profit = info.get("take_profit")
-                        precio_senal = info.get("precio")  # Precio de CIERRE de la vela de señal
-
-                        if (
-                            senal in ("LONG", "SHORT")
-                            and last_signal != senal
-                            and stop_loss
-                            and take_profit
-                            and precio_senal
-                        ):
-                            es_valido = True
-                            precio_entrada_real = precio_senal  # valor por defecto
-
-                            # --- FILTRO DE PRECIO (SLIPPAGE + SL) ---
-                            try:
-                                ticker = exchange.fetch_ticker(symbol)
-                                ask = ticker.get("ask") or ticker.get("last")
-                                bid = ticker.get("bid") or ticker.get("last")
-
-                                if ask is None or bid is None:
-                                    raise Exception("Ticker sin ask/bid válidos")
-
-                                # 1. Comprobación contra el Stop Loss
-                                if senal == "LONG" and ask < stop_loss:
-                                    print(
-                                        f"LONG RECHAZADO: Precio actual ({ask:.6f}) "
-                                        f"ya está por debajo del SL ({stop_loss:.6f})."
-                                    )
-                                    es_valido = False
-                                elif senal == "SHORT" and bid > stop_loss:
-                                    print(
-                                        f"SHORT RECHAZADO: Precio actual ({bid:.6f}) "
-                                        f"ya está por encima del SL ({stop_loss:.6f})."
-                                    )
-                                    es_valido = False
-
-                                # 2. Comprobación de slippage
-                                if es_valido:
-                                    if senal == "LONG":
-                                        if ask > precio_senal * (1 + MAX_SLIPPAGE_PCT):
-                                            print(
-                                                f"LONG RECHAZADO: ask {ask:.6f} muy por encima "
-                                                f"del precio de señal {precio_senal:.6f} "
-                                                f"(slippage > {MAX_SLIPPAGE_PCT*100:.1f}%)."
-                                            )
-                                            es_valido = False
-                                        else:
-                                            precio_entrada_real = ask
-                                    elif senal == "SHORT":
-                                        if bid < precio_senal * (1 - MAX_SLIPPAGE_PCT):
-                                            print(
-                                                f"SHORT RECHAZADO: bid {bid:.6f} muy por debajo "
-                                                f"del precio de señal {precio_senal:.6f} "
-                                                f"(slippage > {MAX_SLIPPAGE_PCT*100:.1f}%)."
-                                            )
-                                            es_valido = False
-                                        else:
-                                            precio_entrada_real = bid
-
-                            except Exception as e_ticker:
-                                print(
-                                    f"Error al obtener ticker en tiempo real para slippage: {e_ticker}. "
-                                    "Usando precio de cierre de la vela."
-                                )
-                                es_valido = True
-                                precio_entrada_real = precio_senal
-
-                            # --- Ejecución de la Señal si es Válida ---
-                            if es_valido:
-                                tamaño, riesgo = calcular_posicion(precio_entrada_real, stop_loss)
-
-                                # PRECIOS
-                                precio_actual = precio_entrada_real
-                                precio_entrada_teorica = precio_senal
-
-                                # Emoji según dirección
-                                emoji_side = "🟢" if senal == "LONG" else "🔴"
-
-                                # Justificación modificada
-                                if senal == "LONG":
-                                    justificacion = (
-                                        "Los indicadores de tendencia (EMAs 20/50) y momentum "
-                                        "(Estocástico K/D) apuntan a un posible movimiento alcista."
-                                    )
-                                else:
-                                    justificacion = (
-                                        "Los indicadores de tendencia (EMAs 20/50) y momentum "
-                                        "(Estocástico K/D) apuntan a un posible movimiento bajista."
-                                    )
-
-                                # Caption completo (mensaje único)
-                                mensaje_entrada = (
-                                    "🎯 ALERTA DE ENTRADA 🎯\n"
-                                    f"📈Par: {symbol} - {senal}{emoji_side}\n"
-                                    f"💰Precio actual: ${precio_actual:.6f}\n"
-                                    f"💰 Precio de entrada: ${precio_entrada_teorica:.6f}\n"
-                                    f"🛡️ Stop-Loss: ${stop_loss:.6f}\n"
-                                    f"🎯 Take-Profit: ${take_profit:.6f}\n\n"
-                                    f"⏳Temporalidad: {TIMEFRAME}\n"
-                                    f"📊Apalancamiento: x{APALANCAMIENTO_FIJO}\n\n"
-                                    "📌 En el gráfico se muestran:\n"
-                                    "• Velas japonesas\n"
-                                    "• EMAs 20 y 50\n"
-                                    "• Estocástico (14, 3, 5)\n\n"
-                                    "Justificación de la señal:\n"
-                                    f"{justificacion}\n\n"
-                                    "ATENCIÓN: Este mensaje es solo informativo y no representa "
-                                    "una recomendación de inversión."
-                                )
-
-                                # Registrar esta predicción para el resumen diario
-                                registrar_prediccion(symbol, senal, precio_entrada_teorica, TIMEFRAME)
-
-                                # Generar y enviar gráfico actualizado
-                                try:
-                                    ruta_chart = crear_grafico_24h(symbol, ohlcv, TIMEFRAME)
-                                    enviar_imagen(ruta_chart, caption=mensaje_entrada)
-                                except Exception as e:
-                                    print(f"No se pudo generar/enviar el gráfico de {symbol}: {e}")
-                                    enviar_mensaje(mensaje_entrada)
-
-                                new_last_signal = senal
-                            else:
-                                print("Señal rechazada por slippage/SL.")
-                        else:
-                            print("Sin nueva entrada operable en esta vela.")
-                            if senal == "NO_TRADE":
-                                new_last_signal = "NO_TRADE"
-
-                    else:
-                        print(f"Misma vela en {symbol}, esperando cierre...")
-
-                    # --- ACTUALIZAR ESTADO DEL SÍMBOLO ---
-                    state[symbol] = {
-                        "last_candle_ts": int(new_last_candle_ts),
-                        "last_signal": new_last_signal,
-                    }
-
-                    time.sleep(0.5)
-
-                except Exception as e_sym:
-                    print(f"Error procesando {symbol}: {e_sym}")
-
-            guardar_state(state)
-
+            for symbol in tickers:
+                full_symbol = f"{symbol}/USDT:USDT"
+                ohlcv = exchange.fetch_ohlcv(full_symbol, timeframe=TIMEFRAME, limit=100)
+                if not ohlcv: continue
+                
+                last_candle_ts = ohlcv[-1][0]
+                symbol_state = state.get(symbol, {"last_candle_ts": 0, "last_signal": "NO_TRADE"})
+                
+                if last_candle_ts > symbol_state["last_candle_ts"]:
+                    info = generar_senal(ohlcv, symbol_state["last_signal"])
+                    
+                    if info["senal"] != "NO_TRADE" and info["senal"] != symbol_state["last_signal"]:
+                        tam, ries = calcular_posicion(info["precio_entrada"], info["stop_loss"])
+                        chart = generar_grafico(full_symbol, ohlcv, info)
+                        
+                        msg = (f"🌊 **NEXTWAVE SIGNAL: {info['senal']}**\n"
+                               f"🪙 Símbolo: {symbol}\n"
+                               f"💰 Entrada: {info['precio_entrada']}\n"
+                               f"🛡️ SL: {info['stop_loss']} | 🎯 TP: {info['take_profit']}\n"
+                               f"📊 Score: {info['score']}\n"
+                               f"📝 Motivo: {', '.join(info['razones'])}")
+                        
+                        enviar_mensaje(msg, chart)
+                        symbol_state["last_signal"] = info["senal"]
+                    
+                    symbol_state["last_candle_ts"] = last_candle_ts
+                    state[symbol] = symbol_state
+                
+                time.sleep(1)
+            time.sleep(UPDATE_INTERVAL)
         except Exception as e:
-            print(f"Error en loop principal: {e}")
+            print(f"Error: {e}")
+            time.sleep(10)
 
-        # Espera general entre ciclos sobre todos los símbolos
-        time.sleep(UPDATE_INTERVAL)
-
-
-# ==================================
-# FLASK PARA HEALTHCHECK EN FLY.IO
-# ==================================
-
+# --- FLASK ---
 app = Flask(__name__)
-
 @app.route("/")
-def home():
-    return "Bot running!", 200
-
-
-def run_flask():
-    app.run(host="0.0.0.0", port=8080)
-
+def home(): return "Bot NextWave activo", 200
 
 if __name__ == "__main__":
-    # Lanzamos Flask en un hilo en segundo plano (para Fly.io)
-    threading.Thread(target=run_flask, daemon=True).start()
-    # Y arrancamos el loop principal del bot
+    threading.Thread(target=lambda: app.run(host="0.0.0.0", port=8080), daemon=True).start()
     main_loop()
