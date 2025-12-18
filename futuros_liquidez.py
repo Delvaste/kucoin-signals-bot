@@ -99,7 +99,7 @@ def generar_senal(ohlcv: list) -> dict:
         score -= 50
         razones.append("🌊 Tendencia Bajista")
 
-    if last['adx'] > 20:
+    if not pd.isna(last['adx']) and last['adx'] > 20:
         if last['k'] < 25 and last['k'] > last['d']:
             score += 40
             razones.append("🚀 Impulso Alcista")
@@ -124,7 +124,6 @@ def main_loop():
         'enableRateLimit': True
     })
 
-    # CARGA DE MERCADOS (Soluciona el error de BadSymbol)
     try:
         print("Cargando mercados de Kucoin Futures...")
         exchange.load_markets()
@@ -132,39 +131,40 @@ def main_loop():
         print(f"Error crítico cargando mercados: {e}")
         return
 
-    tickers_config = CONFIG.get("markets", {}).get("base_tickers", ["XRP", "ADA"])
+    tickers_config = CONFIG.get("markets", {}).get("base_tickers", [])
     state = {}
 
     while True:
         try:
             for base_symbol in tickers_config:
-                # Intentamos varios formatos comunes por si acaso
+                time.sleep(1) # SIEMPRE esperar 1s para evitar bloqueos y spam en logs
+
                 possible_symbols = [
-                    f"{base_symbol}/USDT:USDT",
+                    f"{base_symbol}/USDT:USDT", 
                     f"{base_symbol}USDTM",
-                    f"{base_symbol}USDT"
+                    f"{base_symbol}/USDT"
                 ]
-                
-                full_symbol = None
-                for s in possible_symbols:
-                    if s in exchange.markets:
-                        full_symbol = s
-                        break
+    
+                full_symbol = next((s for s in possible_symbols if s in exchange.markets), None)
                 
                 if not full_symbol:
-                    print(f"Símbolo {base_symbol} no encontrado en Kucoin Futures. Saltando...")
+                    print(f"⚠️ Símbolo {base_symbol} no encontrado. Saltando...")
                     continue
 
                 try:
-                    ohlcv = exchange.fetch_ohlcv(full_symbol, timeframe=TIMEFRAME, limit=100)
+                    # Aumentado a 200 velas para mayor precisión en indicadores
+                    ohlcv = exchange.fetch_ohlcv(full_symbol, timeframe=TIMEFRAME, limit=200)
                     if not ohlcv: continue
                     
                     last_ts = ohlcv[-1][0]
                     symbol_state = state.get(full_symbol, {"ts": 0, "signal": "NO_TRADE"})
 
+                    info = generar_senal(ohlcv)
+                    
+                    # Log de monitoreo (se ve en fly logs)
+                    print(f"🔍 {full_symbol} | Score: {info['score']} | Senal: {info['senal']}")
+
                     if last_ts > symbol_state["ts"]:
-                        info = generar_senal(ohlcv)
-                        
                         if info["senal"] != "NO_TRADE" and info["senal"] != symbol_state["signal"]:
                             chart = generar_grafico(full_symbol, ohlcv)
                             msg = (f"🌊 **NextWave: {info['senal']}**\n"
@@ -180,16 +180,14 @@ def main_loop():
                 
                 except Exception as e:
                     print(f"Error procesando {full_symbol}: {e}")
-                
-                time.sleep(1) # Respetar rate limit
             
+            print(f"✅ Ciclo completado. Esperando {UPDATE_INTERVAL}s...")
             time.sleep(UPDATE_INTERVAL)
             
         except Exception as e:
             print(f"Error en loop: {e}")
             time.sleep(10)
 
-# --- FLASK ---
 app = Flask(__name__)
 @app.route("/")
 def home(): return "Bot Active", 200
