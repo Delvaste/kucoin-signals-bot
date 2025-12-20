@@ -1,11 +1,11 @@
 settings:
   timeframe: "15m"
-  timeframe_candidates: ["15m", "1h", "5m"]   # el bot elige el mejor; desempata a favor de 15m
+  timeframe_candidates: ["15m", "1h"]     # quitamos 5m para evitar ruido
   update_interval: 30
   timezone: "Europe/Madrid"
   daily_summary_at: "00:00"
   log_dir: "logs"
-  max_state_size: 300
+  max_state_size: 500
 
 markets:
   base_tickers:
@@ -20,25 +20,43 @@ markets:
     - HBAR
 
 strategy:
-  # Solo señales de alta convicción
-  min_score_for_entry: 85
+  # Muy asertivo (más duro)
+  min_score_for_entry: 92
 
-  # SL/TP por ATR (más natural que % fijo), con caps por % (por apalancamiento 10x)
+  # Tendencia / fuerza
+  adx_period: 14
+  min_adx: 28
+
+  rsi_period: 14
+  rsi_long_min: 55
+  rsi_short_max: 45
+
+  # SL/TP por ATR + caps por % (pensado para 10x)
   atr_period: 14
   atr_sl_mult: 1.2
   atr_tp_mult: 2.0
-  max_sl_pct: 0.02   # SL máximo 2% desde entrada
-  max_tp_pct: 0.05   # TP máximo 5% desde entrada
+  max_sl_pct: 0.02
+  max_tp_pct: 0.05
 
-  # Anti-chop / confirmación
-  adx_period: 14
-  min_adx: 20
-  rsi_period: 14
-  rsi_long_min: 52
-  rsi_short_max: 48
+  # Volatilidad (evita chop/locura)
+  atr_pct_min: 0.003     # 0.3%
+  atr_pct_max: 0.018     # 1.8%
 
-  # Evitar 2 señales seguidas del mismo ticker (salvo CANCEL por cambio de sesgo)
-  signal_cooldown_min: 30
+  # Alineación 15m ↔ 1h (si no alinean, NO TRADE)
+  alignment_enabled: true
+  alignment_timeframes: ["15m", "1h"]
+  alignment_min_abs_score: 70
+
+  # No spamear la misma moneda
+  signal_cooldown_min: 90
+
+  # Evitar niveles absurdamente cercanos por precision
+  min_move_pct: 0.001    # 0.1%
+
+learning:
+  # Auto-bloqueo si rinde mal
+  min_trades: 8
+  min_ewma_wr: 0.45
 
 notifications:
   telegram:
