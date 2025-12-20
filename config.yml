@@ -1,6 +1,6 @@
 settings:
   timeframe: "15m"
-  timeframe_candidates: ["15m", "1h"]     # quitamos 5m para evitar ruido
+  timeframe_candidates: ["15m", "1h"]
   update_interval: 30
   timezone: "Europe/Madrid"
   daily_summary_at: "00:00"
@@ -20,10 +20,8 @@ markets:
     - HBAR
 
 strategy:
-  # Muy asertivo (más duro)
   min_score_for_entry: 92
 
-  # Tendencia / fuerza
   adx_period: 14
   min_adx: 28
 
@@ -31,30 +29,33 @@ strategy:
   rsi_long_min: 55
   rsi_short_max: 45
 
-  # SL/TP por ATR + caps por % (pensado para 10x)
   atr_period: 14
   atr_sl_mult: 1.2
   atr_tp_mult: 2.0
   max_sl_pct: 0.02
   max_tp_pct: 0.05
 
-  # Volatilidad (evita chop/locura)
-  atr_pct_min: 0.003     # 0.3%
-  atr_pct_max: 0.018     # 1.8%
+  atr_pct_min: 0.003
+  atr_pct_max: 0.018
 
-  # Alineación 15m ↔ 1h (si no alinean, NO TRADE)
+  # NUEVO: filtro rango
+  range_lookback: 20
+  min_range_pct: 0.01
+
+  # NUEVO: RR mínimo
+  min_rr: 1.5
+
+  # NUEVO: confirmación breakout
+  breakout_confirm: true
+
   alignment_enabled: true
   alignment_timeframes: ["15m", "1h"]
   alignment_min_abs_score: 70
 
-  # No spamear la misma moneda
   signal_cooldown_min: 90
-
-  # Evitar niveles absurdamente cercanos por precision
-  min_move_pct: 0.001    # 0.1%
+  min_move_pct: 0.001
 
 learning:
-  # Auto-bloqueo si rinde mal
   min_trades: 8
   min_ewma_wr: 0.45
 
