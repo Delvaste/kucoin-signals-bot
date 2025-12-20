@@ -3,8 +3,18 @@ import json
 from pathlib import Path
 from typing import Tuple
 
-STATE_PATH = Path("logs/learning_state.json")
-STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+def _base_dir() -> Path:
+    # Persistente si Fly monta /data; si no, cae a ./logs
+    if Path("/data").exists():
+        return Path("/data")
+    return Path("logs")
+
+
+BASE_DIR = _base_dir()
+BASE_DIR.mkdir(parents=True, exist_ok=True)
+
+STATE_PATH = BASE_DIR / "learning_state.json"
 
 
 def _load() -> dict:
@@ -35,7 +45,7 @@ def update_result(base: str, tf: str, side: str, outcome: str) -> None:
     if k not in stats:
         stats[k] = {"ewma_wr": 0.5, "n": 0}
 
-    alpha = 0.20
+    alpha = 0.20  # aprende rápido
     win = 1.0 if outcome == "TP" else 0.0
 
     prev = float(stats[k]["ewma_wr"])
@@ -65,9 +75,6 @@ def should_trade(
     ewma = float(s.get("ewma_wr", 0.5))
 
     if n >= min_trades and ewma < min_ewma_wr:
-        return (
-            False,
-            f"bloqueado por bajo rendimiento (ewma_wr={ewma:.2f}, n={n})",
-        )
+        return False, f"bloqueado por bajo rendimiento (ewma_wr={ewma:.2f}, n={n})"
 
     return True, f"ok (ewma_wr={ewma:.2f}, n={n})"
