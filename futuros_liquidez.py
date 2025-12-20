@@ -52,11 +52,19 @@ TIMEFRAME_CANDIDATES = CONFIG.get("settings", {}).get(
 
 UPDATE_INTERVAL = int(CONFIG.get("settings", {}).get("update_interval", 30))
 MAX_STATE_SIZE = int(CONFIG.get("settings", {}).get("max_state_size", 500))
-LOG_DIR = Path(CONFIG.get("settings", {}).get("log_dir", "logs"))
+
+def _log_root() -> Path:
+    # Persistencia en Fly volume si existe
+    if Path("/data").exists():
+        return Path("/data/logs")
+    return Path(CONFIG.get("settings", {}).get("log_dir", "logs"))
+
+LOG_DIR = _log_root()
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 # Estrategia (más estricta)
 MIN_SCORE = float(CONFIG.get("strategy", {}).get("min_score_for_entry", 92))
+
 ADX_PERIOD = int(CONFIG.get("strategy", {}).get("adx_period", 14))
 MIN_ADX = float(CONFIG.get("strategy", {}).get("min_adx", 28))
 
@@ -73,18 +81,27 @@ MAX_TP_PCT = float(CONFIG.get("strategy", {}).get("max_tp_pct", 0.05))
 ATR_PCT_MIN = float(CONFIG.get("strategy", {}).get("atr_pct_min", 0.003))  # 0.3%
 ATR_PCT_MAX = float(CONFIG.get("strategy", {}).get("atr_pct_max", 0.018))  # 1.8%
 
+# Rango mínimo en lookback (evita laterales sin espacio)
+RANGE_LOOKBACK = int(CONFIG.get("strategy", {}).get("range_lookback", 20))
+MIN_RANGE_PCT = float(CONFIG.get("strategy", {}).get("min_range_pct", 0.01))  # 1%
+
+# RR mínimo
+MIN_RR = float(CONFIG.get("strategy", {}).get("min_rr", 1.5))
+
+# Confirmación breakout entrada
+BREAKOUT_CONFIRM = bool(CONFIG.get("strategy", {}).get("breakout_confirm", True))
+
 ALIGNMENT_ENABLED = bool(CONFIG.get("strategy", {}).get("alignment_enabled", True))
 ALIGNMENT_TFS = CONFIG.get("strategy", {}).get("alignment_timeframes", ["15m", "1h"])
 ALIGNMENT_MIN_ABS_SCORE = float(CONFIG.get("strategy", {}).get("alignment_min_abs_score", 70))
 
 SIGNAL_COOLDOWN_MIN = int(CONFIG.get("strategy", {}).get("signal_cooldown_min", 90))
-MIN_MOVE_PCT = float(CONFIG.get("strategy", {}).get("min_move_pct", 0.001))  # 0.1% mínimo entry->tp/sl
+MIN_MOVE_PCT = float(CONFIG.get("strategy", {}).get("min_move_pct", 0.001))  # 0.1%
 
 LEARNING_MIN_TRADES = int(CONFIG.get("learning", {}).get("min_trades", 8))
 LEARNING_MIN_EWMA_WR = float(CONFIG.get("learning", {}).get("min_ewma_wr", 0.45))
 
 DAILY_SUMMARY_AT = CONFIG.get("settings", {}).get("daily_summary_at", "00:00")
-
 TICKERS = CONFIG.get("markets", {}).get("base_tickers", ["XRP"])
 
 # =======================
@@ -95,14 +112,14 @@ SHUTDOWN = False
 def _handle_shutdown(signum, frame):
     global SHUTDOWN
     SHUTDOWN = True
-    print(f"?? Señal de apagado recibida ({signum}). Cerrando limpio…")
+    print(f"[shutdown] Señal recibida: {signum}")
 
 # =======================
 # TELEGRAM
 # =======================
 def enviar_mensaje(texto: str, chart_path: Optional[str] = None) -> None:
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("?? Telegram no configurado (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID).")
+        print("[telegram] No configurado.")
         return
 
     base_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/"
@@ -126,7 +143,7 @@ def enviar_mensaje(texto: str, chart_path: Optional[str] = None) -> None:
                 timeout=15,
             )
     except Exception as e:
-        print(f"Error Telegram: {e}")
+        print(f"[telegram] Error: {e}")
 
 # =======================
 # GRÁFICOS
@@ -151,7 +168,7 @@ def generar_grafico(symbol: str, timeframe: str, ohlcv: List[List[float]]) -> Op
         mpf.plot(df_plot, type="candle", addplot=ap, savefig=filename, style="charles", tight_layout=True)
         return filename
     except Exception as e:
-        print(f"Error gráfico: {e}")
+        print(f"[chart] Error: {e}")
         return None
 
 # =======================
@@ -204,9 +221,7 @@ def candle_ts(ohlcv: List[List[float]]) -> int:
     return int(ohlcv[-1][0])
 
 def round_price(exchange, symbol: str, price: float) -> float:
-    """
-    Ajuste a la precisión del mercado (evita TP/SL iguales en memes con muchos decimales).
-    """
+    """Ajuste a la precisión del mercado (evita TP/SL iguales en memes)."""
     try:
         m = exchange.market(symbol)
         prec = (m.get("precision") or {}).get("price", None)
@@ -217,9 +232,7 @@ def round_price(exchange, symbol: str, price: float) -> float:
         return float(price)
 
 def clamp_levels(entry: float, sl: float, tp: float, side: str) -> Tuple[float, float]:
-    """
-    Caps por % para 10x.
-    """
+    """Caps por % para 10x."""
     entry = float(entry)
     if side == "LONG":
         sl_min = entry * (1 - MAX_SL_PCT)
@@ -256,12 +269,15 @@ class Signal:
 
 def detectar_signal_alta_precision(ohlcv: List[List[float]]) -> dict:
     """
-    Señal estricta:
-    - ADX mínimo (fuerza tendencia)
-    - EMA20/EMA50 (tendencia)
-    - RSI confirmación
-    - Stoch para timing (suma)
-    - ATR% filtro de volatilidad
+    Señal estricta + más asertiva:
+    - ATR% en rango (evita chop o locura)
+    - ADX mínimo
+    - EMA20/EMA50 tendencia + cruce suma
+    - RSI confirmación dura (si no acompaña, NO TRADE)
+    - Stoch timing suma
+    - Filtro rango 20 velas
+    - Confirmación breakout entrada (prev_high/prev_low)
+    - RR mínimo (>= MIN_RR)
     """
     df = pd.DataFrame(ohlcv, columns=["ts", "open", "high", "low", "close", "vol"])
     if len(df) < 80:
@@ -281,7 +297,7 @@ def detectar_signal_alta_precision(ohlcv: List[List[float]]) -> dict:
     last = df.iloc[-1]
     prev = df.iloc[-2]
 
-    entry = float(last["close"])
+    entry_market = float(last["close"])
     adx = float(last["adx"])
     rsi = float(last["rsi"])
     atr = float(last["atr"])
@@ -291,21 +307,21 @@ def detectar_signal_alta_precision(ohlcv: List[List[float]]) -> dict:
     reasons: List[str] = []
     score = 0.0
 
-    # ATR% filtro (evita chop / locura)
+    # ATR% filtro
     if atr <= 0 or np.isnan(atr):
-        return {"signal": "NO_TRADE", "score": 0, "reasons": ["ATR inválido"], "entry": entry, "sl": None, "tp": None}
+        return {"signal": "NO_TRADE", "score": 0, "reasons": ["ATR inválido"], "entry": entry_market, "sl": None, "tp": None}
 
-    atr_pct = atr / entry
+    atr_pct = atr / entry_market
     if atr_pct < ATR_PCT_MIN or atr_pct > ATR_PCT_MAX:
         return {
             "signal": "NO_TRADE",
             "score": 0,
-            "reasons": [f"? ATR% fuera de rango ({atr_pct*100:.2f}%, rango {ATR_PCT_MIN*100:.2f}-{ATR_PCT_MAX*100:.2f}%)"],
-            "entry": entry,
+            "reasons": [f"ATR% fuera de rango ({atr_pct*100:.2f}%)"],
+            "entry": entry_market,
             "sl": None,
             "tp": None,
         }
-    reasons.append(f"??? ATR% OK ({atr_pct*100:.2f}%)")
+    reasons.append(f"ATR% OK ({atr_pct*100:.2f}%)")
     score += 10
 
     # ADX mínimo
@@ -313,14 +329,32 @@ def detectar_signal_alta_precision(ohlcv: List[List[float]]) -> dict:
         return {
             "signal": "NO_TRADE",
             "score": 0,
-            "reasons": [f"? ADX bajo ({adx:.1f} < {MIN_ADX})"],
-            "entry": entry,
+            "reasons": [f"ADX bajo ({adx:.1f} < {MIN_ADX})"],
+            "entry": entry_market,
             "sl": None,
             "tp": None,
         }
-    reasons.append(f"?? ADX OK ({adx:.1f})")
+    reasons.append(f"ADX OK ({adx:.1f})")
     score += 25
 
+    # Filtro rango (evita estrecho/lateral)
+    lookback = min(RANGE_LOOKBACK, len(df))
+    hh = float(df["high"].tail(lookback).max())
+    ll = float(df["low"].tail(lookback).min())
+    range_pct = (hh - ll) / entry_market
+    if range_pct < MIN_RANGE_PCT:
+        return {
+            "signal": "NO_TRADE",
+            "score": 0,
+            "reasons": [f"Rango bajo {lookback} velas ({range_pct*100:.2f}% < {MIN_RANGE_PCT*100:.2f}%)"],
+            "entry": entry_market,
+            "sl": None,
+            "tp": None,
+        }
+    reasons.append(f"Rango {lookback} velas OK ({range_pct*100:.2f}%)")
+    score += 10
+
+    # EMA tendencia
     ema20 = float(last["ema20"])
     ema50 = float(last["ema50"])
     prev_ema20 = float(prev["ema20"])
@@ -329,64 +363,115 @@ def detectar_signal_alta_precision(ohlcv: List[List[float]]) -> dict:
     bullish = ema20 > ema50
     bearish = ema20 < ema50
 
-    # Tendencia + cruce
     if bullish:
         score += 35
-        reasons.append("?? Tendencia alcista (EMA20>EMA50)")
+        reasons.append("Tendencia alcista EMA20>EMA50")
         if prev_ema20 <= prev_ema50:
             score += 10
-            reasons.append("?? Cruce alcista reciente")
+            reasons.append("Cruce alcista reciente")
     elif bearish:
         score -= 35
-        reasons.append("?? Tendencia bajista (EMA20<EMA50)")
+        reasons.append("Tendencia bajista EMA20<EMA50")
         if prev_ema20 >= prev_ema50:
             score -= 10
-            reasons.append("?? Cruce bajista reciente")
+            reasons.append("Cruce bajista reciente")
 
-    # RSI confirmación (más duro)
+    # RSI confirmación dura
     if bullish and rsi >= RSI_LONG_MIN:
         score += 20
-        reasons.append(f"? RSI confirma long ({rsi:.1f} = {RSI_LONG_MIN})")
+        reasons.append(f"RSI confirma LONG ({rsi:.1f})")
     elif bearish and rsi <= RSI_SHORT_MAX:
         score -= 20
-        reasons.append(f"? RSI confirma short ({rsi:.1f} = {RSI_SHORT_MAX})")
+        reasons.append(f"RSI confirma SHORT ({rsi:.1f})")
     else:
-        # si RSI no acompaña, prácticamente descartamos
-        reasons.append(f"?? RSI no acompaña ({rsi:.1f})")
-        return {"signal": "NO_TRADE", "score": 0, "reasons": reasons, "entry": entry, "sl": None, "tp": None}
+        return {
+            "signal": "NO_TRADE",
+            "score": 0,
+            "reasons": reasons + [f"RSI no acompaña ({rsi:.1f})"],
+            "entry": entry_market,
+            "sl": None,
+            "tp": None,
+        }
 
-    # Timing Stoch (solo suma, no obliga)
+    # Stoch timing (solo suma)
     prev_k = float(prev["k"])
     prev_d = float(prev["d"])
     if bullish and (k > d) and (prev_k <= prev_d) and (k < 35):
         score += 10
-        reasons.append("?? Timing alcista (Stoch cruce en zona baja)")
+        reasons.append("Timing Stoch alcista")
     elif bearish and (k < d) and (prev_k >= prev_d) and (k > 65):
         score -= 10
-        reasons.append("?? Timing bajista (Stoch cruce en zona alta)")
+        reasons.append("Timing Stoch bajista")
     else:
-        reasons.append("? Stoch sin timing claro")
+        reasons.append("Stoch sin timing claro")
 
-    # SL/TP por ATR + caps
-    sl_long = entry - ATR_SL_MULT * atr
-    tp_long = entry + ATR_TP_MULT * atr
-    sl_short = entry + ATR_SL_MULT * atr
-    tp_short = entry - ATR_TP_MULT * atr
-
-    signal = "NO_TRADE"
-    sl = None
-    tp = None
-
+    # Decide señal por score
+    signal_out = "NO_TRADE"
     if score >= MIN_SCORE:
-        signal = "LONG"
-        sl = float(sl_long)
-        tp = float(tp_long)
+        signal_out = "LONG"
     elif score <= -MIN_SCORE:
-        signal = "SHORT"
-        sl = float(sl_short)
-        tp = float(tp_short)
+        signal_out = "SHORT"
+    else:
+        return {"signal": "NO_TRADE", "score": float(score), "reasons": reasons, "entry": entry_market, "sl": None, "tp": None}
 
-    return {"signal": signal, "score": float(score), "reasons": reasons, "entry": entry, "sl": sl, "tp": tp}
+    # Confirmación breakout (entrada recomendada)
+    prev_high = float(prev["high"])
+    prev_low = float(prev["low"])
+
+    entry = entry_market
+    if BREAKOUT_CONFIRM:
+        if signal_out == "LONG":
+            if entry_market <= prev_high:
+                return {
+                    "signal": "NO_TRADE",
+                    "score": 0,
+                    "reasons": reasons + ["Falta confirmación: no rompe high previo"],
+                    "entry": entry_market,
+                    "sl": None,
+                    "tp": None,
+                }
+            entry = prev_high
+            reasons.append("Entrada confirmada: breakout high previo")
+        elif signal_out == "SHORT":
+            if entry_market >= prev_low:
+                return {
+                    "signal": "NO_TRADE",
+                    "score": 0,
+                    "reasons": reasons + ["Falta confirmación: no rompe low previo"],
+                    "entry": entry_market,
+                    "sl": None,
+                    "tp": None,
+                }
+            entry = prev_low
+            reasons.append("Entrada confirmada: breakout low previo")
+
+    # SL/TP por ATR usando ENTRY confirmada
+    if signal_out == "LONG":
+        sl = entry - ATR_SL_MULT * atr
+        tp = entry + ATR_TP_MULT * atr
+    else:
+        sl = entry + ATR_SL_MULT * atr
+        tp = entry - ATR_TP_MULT * atr
+
+    # RR mínimo
+    risk = abs(entry - sl)
+    reward = abs(tp - entry)
+    if risk <= 0 or reward <= 0:
+        return {"signal": "NO_TRADE", "score": 0, "reasons": reasons + ["Riesgo/reward inválido"], "entry": entry, "sl": None, "tp": None}
+
+    rr = reward / risk
+    if rr < MIN_RR:
+        return {
+            "signal": "NO_TRADE",
+            "score": 0,
+            "reasons": reasons + [f"RR bajo ({rr:.2f} < {MIN_RR})"],
+            "entry": entry,
+            "sl": None,
+            "tp": None,
+        }
+    reasons.append(f"RR OK ({rr:.2f})")
+
+    return {"signal": signal_out, "score": float(score), "reasons": reasons, "entry": float(entry), "sl": float(sl), "tp": float(tp)}
 
 # =======================
 # MULTI-TF ALIGNMENT
@@ -406,20 +491,13 @@ def aligned_direction(res_a: dict, res_b: dict) -> bool:
     return False
 
 def choose_best_timeframe(exchange, symbol: str) -> Tuple[str, dict, List[List[float]]]:
-    """
-    Evalúa timeframes candidatos y elige el de mayor |score|.
-    Si alignment está activado:
-      - exige que 15m y 1h estén alineados (mismo LONG/SHORT)
-      - y que ambos tengan |score| >= ALIGNMENT_MIN_ABS_SCORE
-    """
     cached: Dict[str, Tuple[dict, List[List[float]]]] = {}
 
-    # precache alignment tfs
     for tf in set(TIMEFRAME_CANDIDATES + ALIGNMENT_TFS):
         try:
             cached[tf] = evaluate_tf(exchange, symbol, tf)
         except Exception as e:
-            print(f"TF error {symbol} {tf}: {e}")
+            print(f"[tf] error {symbol} {tf}: {e}")
 
     if ALIGNMENT_ENABLED:
         tf_a, tf_b = ALIGNMENT_TFS[0], ALIGNMENT_TFS[1]
@@ -427,10 +505,10 @@ def choose_best_timeframe(exchange, symbol: str) -> Tuple[str, dict, List[List[f
         rb, _ = cached.get(tf_b, ({"signal": "NO_TRADE", "score": 0}, []))
 
         if not aligned_direction(ra, rb):
-            return PRIMARY_TIMEFRAME, {"signal": "NO_TRADE", "score": 0, "reasons": ["?? No alineación 15m?1h"]}, []
+            return PRIMARY_TIMEFRAME, {"signal": "NO_TRADE", "score": 0, "reasons": ["No alineación 15m↔1h"]}, []
 
         if abs(float(ra.get("score", 0))) < ALIGNMENT_MIN_ABS_SCORE or abs(float(rb.get("score", 0))) < ALIGNMENT_MIN_ABS_SCORE:
-            return PRIMARY_TIMEFRAME, {"signal": "NO_TRADE", "score": 0, "reasons": [f"?? Alineación débil (<{ALIGNMENT_MIN_ABS_SCORE})"]}, []
+            return PRIMARY_TIMEFRAME, {"signal": "NO_TRADE", "score": 0, "reasons": [f"Alineación débil (<{ALIGNMENT_MIN_ABS_SCORE})"]}, []
 
     best = None  # (abs_score, tf, res, ohlcv)
     for tf in TIMEFRAME_CANDIDATES:
@@ -439,6 +517,7 @@ def choose_best_timeframe(exchange, symbol: str) -> Tuple[str, dict, List[List[f
         score = float(res.get("score", 0))
         if sig == "NO_TRADE":
             continue
+
         cand = (abs(score), tf, res, ohlcv)
         if best is None:
             best = cand
@@ -456,45 +535,43 @@ def choose_best_timeframe(exchange, symbol: str) -> Tuple[str, dict, List[List[f
 # MENSAJES
 # =======================
 def format_signal_message(sig: Signal) -> str:
-    emoji = "??" if sig.side == "LONG" else "??"
+    emoji = "🟢" if sig.side == "LONG" else "🔴"
     return (
-        f"{emoji} **ENTRADA MUY ASEGURADA: {sig.side}**\n\n"
-        f"?? **Activo:** `{sig.symbol}`\n"
-        f"?? **Timeframe:** `{sig.timeframe}` (prioridad 15m)\n"
-        f"?? **Entrada (recomendada):** `{sig.entry:.10f}`\n"
-        f"?? **Salida (TP recomendada):** `{sig.tp:.10f}`\n"
-        f"?? **Stop (SL):** `{sig.sl:.10f}`\n\n"
-        f"?? **Score:** `{sig.score:.1f}` (min `{MIN_SCORE}`)\n"
-        f"?? **Motivos:** {', '.join(sig.reasons)}\n"
-        f"?? **Hora local:** `{sig.opened_at_local}`"
+        f"{emoji} **SEÑAL (ALTA CONVICCIÓN): {sig.side}**\n\n"
+        f"🪙 **Activo:** `{sig.symbol}`\n"
+        f"⏱️ **Timeframe:** `{sig.timeframe}`\n"
+        f"💰 **Entrada (recomendada):** `{sig.entry:.10f}`\n"
+        f"🎯 **TP:** `{sig.tp:.10f}`\n"
+        f"🛑 **SL:** `{sig.sl:.10f}`\n\n"
+        f"📊 **Score:** `{sig.score:.1f}` (min `{MIN_SCORE}`)\n"
+        f"📝 **Motivos:** {', '.join(sig.reasons)}\n"
+        f"🕒 **Hora local:** `{sig.opened_at_local}`"
     )
 
 def format_cancel_message(symbol: str, reason: str) -> str:
     return (
-        f"?? **CANCELAR ORDEN**\n\n"
-        f"?? **Activo:** `{symbol}`\n"
-        f"?? **Motivo:** {reason}\n"
-        f"?? **Hora local:** `{local_str(now_local())}`"
+        f"🟠 **CANCELAR ORDEN**\n\n"
+        f"🪙 **Activo:** `{symbol}`\n"
+        f"🧠 **Motivo:** {reason}\n"
+        f"🕒 **Hora local:** `{local_str(now_local())}`"
     )
 
 def format_close_message(sig: Signal) -> str:
-    emoji = "?" if sig.status == "TP" else "??" if sig.status == "SL" else "?"
+    emoji = "✅" if sig.status == "TP" else "🛑" if sig.status == "SL" else "⚪"
     return (
-        f"{emoji} **CIERRE SEÑAL: {sig.status}**\n\n"
-        f"?? **Activo:** `{sig.symbol}`\n"
-        f"?? **Lado:** `{sig.side}` | ?? `{sig.timeframe}`\n"
-        f"?? **Entrada:** `{sig.entry:.10f}`\n"
-        f"?? **TP:** `{sig.tp:.10f}` | ?? **SL:** `{sig.sl:.10f}`\n"
-        f"?? **Apertura:** `{sig.opened_at_local}`\n"
-        f"?? **Cierre:** `{sig.closed_at_local}`\n"
-        f"?? **Notas:** {sig.notes or '-'}"
+        f"{emoji} **CIERRE: {sig.status}**\n\n"
+        f"🪙 `{sig.symbol}` | `{sig.side}` | `{sig.timeframe}`\n"
+        f"Entrada `{sig.entry:.10f}` | TP `{sig.tp:.10f}` | SL `{sig.sl:.10f}`\n"
+        f"Apertura `{sig.opened_at_local}`\n"
+        f"Cierre `{sig.closed_at_local}`\n"
+        f"Notas: {sig.notes or '-'}"
     )
 
 def send_daily_summary(for_day: date) -> None:
     dt = datetime(for_day.year, for_day.month, for_day.day, 12, 0, tzinfo=TZ)
     items = load_day_signals(dt)
     if not items:
-        enviar_mensaje(f"?? **Resumen diario {for_day.isoformat()}**\n\nSin señales registradas.")
+        enviar_mensaje(f"📌 **Resumen diario {for_day.isoformat()}**\n\nSin señales registradas.")
         return
 
     total = len(items)
@@ -506,21 +583,25 @@ def send_daily_summary(for_day: date) -> None:
     lines = []
     for x in items[-25:]:
         lines.append(
-            f"- `{x.get('symbol')}` {x.get('side')} `{x.get('timeframe')}` ? **{x.get('status')}** | "
+            f"- `{x.get('symbol')}` {x.get('side')} `{x.get('timeframe')}` → **{x.get('status')}** | "
             f"Entry `{float(x.get('entry',0)):.6f}` TP `{float(x.get('tp',0)):.6f}` SL `{float(x.get('sl',0)):.6f}`"
         )
 
     msg = (
-        f"?? **Resumen diario {for_day.isoformat()}**\n\n"
-        f"Total: **{total}** | ? TP: **{tp}** | ?? SL: **{sl}** | ?? Canceladas: **{canc}** | ? Abiertas: **{open_}**\n\n"
-        f"?? **Últimas {min(total, 25)} señales:**\n" + "\n".join(lines)
+        f"📌 **Resumen diario {for_day.isoformat()}**\n\n"
+        f"Total: **{total}** | ✅ TP: **{tp}** | 🛑 SL: **{sl}** | 🟠 Canceladas: **{canc}** | ⏳ Abiertas: **{open_}**\n\n"
+        f"📋 Últimas {min(total, 25)}:\n" + "\n".join(lines)
     )
     enviar_mensaje(msg)
 
 # =======================
-# TRACKING TP/SL (verificación)
+# TRACKING TP/SL (más realista)
 # =======================
 def check_signal_outcome(exchange, sig: Signal) -> Optional[str]:
+    """
+    - TP: por toque (high/low)
+    - SL: por cierre (close) -> reduce falsos SL por mecha
+    """
     try:
         ohlcv = exchange.fetch_ohlcv(sig.symbol, timeframe=sig.timeframe, limit=3)
         if not ohlcv:
@@ -528,27 +609,28 @@ def check_signal_outcome(exchange, sig: Signal) -> Optional[str]:
         last = ohlcv[-1]
         high = float(last[2])
         low = float(last[3])
+        close = float(last[4])
 
         if sig.side == "LONG":
             if high >= sig.tp:
                 return "TP"
-            if low <= sig.sl:
+            if close <= sig.sl:
                 return "SL"
         else:
             if low <= sig.tp:
                 return "TP"
-            if high >= sig.sl:
+            if close >= sig.sl:
                 return "SL"
         return None
     except Exception as e:
-        print(f"Outcome check error {sig.symbol}: {e}")
+        print(f"[outcome] Error {sig.symbol}: {e}")
         return None
 
 # =======================
 # LOOP PRINCIPAL
 # =======================
 def main_loop() -> None:
-    print("?? Bot (Alta Precisión + Autoaprendizaje) iniciado…")
+    print("[bot] Iniciado (Alta Precisión + Autoaprendizaje + Filtros extra)")
 
     exchange = ccxt.kucoinfutures({
         "apiKey": KUCOIN_API_KEY,
@@ -569,12 +651,13 @@ def main_loop() -> None:
                 break
             if sig.status != "OPEN":
                 continue
+
             outcome = check_signal_outcome(exchange, sig)
             if outcome in ("TP", "SL"):
                 sig.status = outcome
                 sig.closed_ts = int(time.time() * 1000)
                 sig.closed_at_local = local_str(now_local())
-                sig.notes = "Verificado por toque de vela (high/low) en el timeframe de la señal."
+                sig.notes = "TP por toque; SL por cierre (close)."
                 append_log(sig)
 
                 # Autoaprendizaje
@@ -586,7 +669,7 @@ def main_loop() -> None:
         if SHUTDOWN:
             break
 
-        # 2) Generar nuevas señales (muy selectivo)
+        # 2) Generar nuevas señales (selectivo)
         for base in TICKERS:
             if SHUTDOWN:
                 break
@@ -613,25 +696,26 @@ def main_loop() -> None:
             tp = float(res["tp"])
             reasons = list(res.get("reasons", []))
 
-            # Autoaprendizaje: bloquear si ese combo rinde mal
+            # Aprendizaje: bloquear combos malos
             ok, why = should_trade(
                 base, tf, sig_type,
                 min_trades=LEARNING_MIN_TRADES,
                 min_ewma_wr=LEARNING_MIN_EWMA_WR
             )
             if not ok:
-                print(f"?? {base} {tf} {sig_type}: {why}")
+                print(f"[learning] bloqueado {base} {tf} {sig_type}: {why}")
                 continue
 
-            # Caps SL/TP y redondeo a tick/precision
+            # Caps + precision
             sl, tp = clamp_levels(entry, sl, tp, sig_type)
+
             entry = round_price(exchange, symbol, entry)
             sl = round_price(exchange, symbol, sl)
             tp = round_price(exchange, symbol, tp)
 
-            # Evitar señales “absurdas” (tp/sl demasiado cerca por precision)
+            # Evitar niveles absurdamente cerca
             if abs(tp - entry) / entry < MIN_MOVE_PCT or abs(entry - sl) / entry < MIN_MOVE_PCT:
-                print(f"?? {base} {tf}: niveles demasiado cerca (precision/tick). NO_TRADE")
+                print(f"[levels] {base} {tf}: niveles demasiado cerca. NO_TRADE")
                 continue
 
             last_ts = candle_ts(ohlcv)
@@ -639,11 +723,11 @@ def main_loop() -> None:
             if unique_id in sent_ids:
                 continue
 
-            # Regla: no 2 seguidas misma moneda salvo CANCEL por cambio de sesgo
+            # Regla: no 2 órdenes seguidas misma moneda salvo CANCEL por cambio de sesgo
             if base in active_by_base and active_by_base[base].status == "OPEN":
                 prev_sig = active_by_base[base]
                 if prev_sig.side != sig_type:
-                    enviar_mensaje(format_cancel_message(symbol, f"Cambio de sesgo: {prev_sig.side} ? {sig_type}. Cancela la anterior."))
+                    enviar_mensaje(format_cancel_message(symbol, f"Cambio de sesgo: {prev_sig.side} → {sig_type}. Cancela la anterior."))
                     prev_sig.status = "CANCELLED"
                     prev_sig.closed_ts = int(time.time() * 1000)
                     prev_sig.closed_at_local = local_str(now_local())
@@ -664,7 +748,7 @@ def main_loop() -> None:
                 tp=tp,
                 sl=sl,
                 score=score,
-                reasons=reasons + [f"?? Learning: {why}"],
+                reasons=reasons + [f"Learning: {why}"],
                 opened_ts=last_ts,
                 opened_at_local=local_str(opened_dt),
             )
