@@ -712,11 +712,28 @@ def main_loop() -> None:
             entry = round_price(exchange, symbol, entry)
             sl = round_price(exchange, symbol, sl)
             tp = round_price(exchange, symbol, tp)
+            # --- GUARD: niveles inválidos (evita ZeroDivision y señales rotas) ---
+            if not np.isfinite(entry) or not np.isfinite(sl) or not np.isfinite(tp):
+                print(f"[guard] {symbol} niveles no finitos: entry={entry} sl={sl} tp={tp}")
+                continue
+
+            # Algunos mercados/memes pueden devolver 0 o redondear a 0 con precision rara
+            if entry <= 0:
+                print(f"[guard] {symbol} entry inválida (<=0): entry={entry} (raw levels tp={tp}, sl={sl})")
+                continue
+
+            # Evita niveles idénticos (puede ocurrir por redondeo)
+            if tp == entry or sl == entry or tp == sl:
+                print(f"[guard] {symbol} niveles degenerados: entry={entry} sl={sl} tp={tp}")
+                continue
 
             # Evitar niveles absurdamente cerca
-            if abs(tp - entry) / entry < MIN_MOVE_PCT or abs(entry - sl) / entry < MIN_MOVE_PCT:
-                print(f"[levels] {base} {tf}: niveles demasiado cerca. NO_TRADE")
+            move_tp = abs(tp - entry) / max(entry, 1e-12)
+            move_sl = abs(entry - sl) / max(entry, 1e-12)
+            if move_tp < MIN_MOVE_PCT or move_sl < MIN_MOVE_PCT:
+                print(f"[levels] {base} {tf}: movimientos muy pequeños TP={move_tp:.6f} SL={move_sl:.6f}. NO_TRADE")
                 continue
+
 
             last_ts = candle_ts(ohlcv)
             unique_id = f"{symbol}|{tf}|{last_ts}|{sig_type}"
