@@ -645,6 +645,9 @@ def main_loop() -> None:
     sent_ids: Dict[str, bool] = {}
 
     while not SHUTDOWN:
+        # heartbeat cada ~60s (para ver que el loop está vivo)
+        if int(time.time()) % 60 == 0:
+            print(f"[heartbeat] {local_str(now_local())} alive")
         # 1) Revisar abiertas
         for base, sig in list(active_by_base.items()):
             if SHUTDOWN:
