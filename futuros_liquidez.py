@@ -691,7 +691,10 @@ def main_loop() -> None:
             tf, res, ohlcv = choose_best_timeframe(exchange, symbol)
             sig_type = res.get("signal", "NO_TRADE")
             if sig_type == "NO_TRADE" or not ohlcv:
+                if int(time.time()) % 300 == 0:  # cada ~5 min
+                    print(f"[no_trade] {base} tf={tf} reasons={(res.get('reasons') or [])[:2]}")
                 continue
+
 
             score = float(res.get("score", 0))
             entry = float(res["entry"])
