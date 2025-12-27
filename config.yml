@@ -50,7 +50,7 @@ strategy:
 
   alignment_enabled: true
   alignment_timeframes: ["15m", "1h"]
-  alignment_min_abs_score: 50
+  alignment_min_abs_score: 45
 
   signal_cooldown_min: 90
   min_move_pct: 0.001
