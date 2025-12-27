@@ -95,7 +95,7 @@ ALIGNMENT_ENABLED = bool(CONFIG.get("strategy", {}).get("alignment_enabled", Tru
 ALIGNMENT_TFS = CONFIG.get("strategy", {}).get("alignment_timeframes", ["15m", "1h"])
 ALIGNMENT_MIN_ABS_SCORE = float(CONFIG.get("strategy", {}).get("alignment_min_abs_score", 70))
 
-SIGNAL_COOLDOWN_MIN = int(CONFIG.get("strategy", {}).get("signal_cooldown_min", 90))
+SIGNAL_COOLDOWN_MIN = int(CONFIG.get("strategy", {}).get("signal_cooldown_min", 45))
 MIN_MOVE_PCT = float(CONFIG.get("strategy", {}).get("min_move_pct", 0.001))  # 0.1%
 
 LEARNING_MIN_TRADES = int(CONFIG.get("learning", {}).get("min_trades", 8))
@@ -486,8 +486,19 @@ def evaluate_tf(exchange, symbol: str, tf: str) -> Tuple[dict, List[List[float]]
 def aligned_direction(res_a: dict, res_b: dict) -> bool:
     sa = res_a.get("signal")
     sb = res_b.get("signal")
-    if sa in ("LONG", "SHORT") and sb in ("LONG", "SHORT"):
+
+    # La primaria debe tener señal
+    if sa not in ("LONG", "SHORT"):
+        return False
+
+    # Si el marco mayor no tiene señal, lo tratamos como neutral (no bloquea)
+    if sb == "NO_TRADE":
+        return True
+
+    # Si el marco mayor sí tiene señal, debe coincidir
+    if sb in ("LONG", "SHORT"):
         return sa == sb
+
     return False
 
 def choose_best_timeframe(exchange, symbol: str) -> Tuple[str, dict, List[List[float]]]:
