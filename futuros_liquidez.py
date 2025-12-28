@@ -518,7 +518,7 @@ def choose_best_timeframe(exchange, symbol: str) -> Tuple[str, dict, List[List[f
         sa = ra.get("signal", "NO_TRADE")
         sb = rb.get("signal", "NO_TRADE")
 
-        # Si 15m NO tiene señal, devolvemos su razón real (no “alineación”)
+        # Si 15m NO tiene señal, devolvemos la razón real (no “alineación”)
         if sa == "NO_TRADE":
             reasons = ra.get("reasons") or ["NO_TRADE"]
             return PRIMARY_TIMEFRAME, {"signal": "NO_TRADE", "score": float(ra.get("score", 0)), "reasons": reasons}, []
@@ -539,7 +539,7 @@ def choose_best_timeframe(exchange, symbol: str) -> Tuple[str, dict, List[List[f
                 return PRIMARY_TIMEFRAME, {"signal": "NO_TRADE", "score": 0,
                                            "reasons": [f"Alineación débil 1h (<{ALIGNMENT_MIN_ABS_SCORE})"]}, []
 
-    best = None  # (abs_score, tf, res, ohlcv)
+    best = None
     for tf in TIMEFRAME_CANDIDATES:
         res, ohlcv = cached.get(tf, ({"signal": "NO_TRADE", "score": 0, "reasons": ["sin datos"]}, []))
         sig = res.get("signal", "NO_TRADE")
@@ -548,13 +548,8 @@ def choose_best_timeframe(exchange, symbol: str) -> Tuple[str, dict, List[List[f
             continue
 
         cand = (abs(score), tf, res, ohlcv)
-        if best is None:
+        if best is None or cand[0] > best[0] + 1e-9 or (abs(cand[0] - best[0]) <= 1e-9 and best[1] != PRIMARY_TIMEFRAME and tf == PRIMARY_TIMEFRAME):
             best = cand
-        else:
-            if cand[0] > best[0] + 1e-9:
-                best = cand
-            elif abs(cand[0] - best[0]) <= 1e-9 and best[1] != PRIMARY_TIMEFRAME and tf == PRIMARY_TIMEFRAME:
-                best = cand
 
     if best is None:
         return PRIMARY_TIMEFRAME, {"signal": "NO_TRADE", "score": 0, "reasons": ["NO_TRADE"]}, []
