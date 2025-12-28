@@ -642,6 +642,10 @@ def check_signal_outcome(exchange, sig: Signal) -> Optional[str]:
 # =======================
 def main_loop() -> None:
     print("[bot] Iniciado (Alta Precisión + Autoaprendizaje + Filtros extra)")
+    print("[BUILD] aligned_neutral=ON v=2025-12-28-01", flush=True)
+    print(f"[CFG] MIN_SCORE={MIN_SCORE} MIN_ADX={MIN_ADX} RSI_L={RSI_LONG_MIN} RSI_S={RSI_SHORT_MAX} "
+          f"ALIGN_MIN={ALIGNMENT_MIN_ABS_SCORE} BREAKOUT={BREAKOUT_CONFIRM} COOLDOWN={SIGNAL_COOLDOWN_MIN}", flush=True)
+
 
     exchange = ccxt.kucoinfutures({
         "apiKey": KUCOIN_API_KEY,
