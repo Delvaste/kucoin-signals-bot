@@ -512,14 +512,30 @@ def choose_best_timeframe(exchange, symbol: str) -> Tuple[str, dict, List[List[f
 
     if ALIGNMENT_ENABLED:
         tf_a, tf_b = ALIGNMENT_TFS[0], ALIGNMENT_TFS[1]
-        ra, _ = cached.get(tf_a, ({"signal": "NO_TRADE", "score": 0}, []))
-        rb, _ = cached.get(tf_b, ({"signal": "NO_TRADE", "score": 0}, []))
+        ra, _ = cached.get(tf_a, ({"signal": "NO_TRADE", "score": 0, "reasons": ["sin datos"]}, []))
+        rb, _ = cached.get(tf_b, ({"signal": "NO_TRADE", "score": 0, "reasons": ["sin datos"]}, []))
 
-        if not aligned_direction(ra, rb):
-            return PRIMARY_TIMEFRAME, {"signal": "NO_TRADE", "score": 0, "reasons": ["No alineación 15m↔1h"]}, []
+        sa = ra.get("signal", "NO_TRADE")
+        sb = rb.get("signal", "NO_TRADE")
 
-        if abs(float(ra.get("score", 0))) < ALIGNMENT_MIN_ABS_SCORE or abs(float(rb.get("score", 0))) < ALIGNMENT_MIN_ABS_SCORE:
-            return PRIMARY_TIMEFRAME, {"signal": "NO_TRADE", "score": 0, "reasons": [f"Alineación débil (<{ALIGNMENT_MIN_ABS_SCORE})"]}, []
+        if sa == "NO_TRADE":
+            reasons = ra.get("reasons") or ["NO_TRADE"]
+            return PRIMARY_TIMEFRAME, {"signal": "NO_TRADE", "score": float(ra.get("score", 0)), "reasons": reasons}, []
+
+        if abs(float(ra.get("score", 0))) < ALIGNMENT_MIN_ABS_SCORE:
+            return PRIMARY_TIMEFRAME, {"signal": "NO_TRADE", "score": 0,
+                                       "reasons": [f"Alineación débil 15m (<{ALIGNMENT_MIN_ABS_SCORE})"]}, []
+
+        if sb == "NO_TRADE":
+            pass
+        else:
+            if sb != sa:
+                return PRIMARY_TIMEFRAME, {"signal": "NO_TRADE", "score": 0,
+                                           "reasons": ["No alineación 15m↔1h (1h en contra)"]}, []
+
+            if abs(float(rb.get("score", 0))) < ALIGNMENT_MIN_ABS_SCORE:
+                return PRIMARY_TIMEFRAME, {"signal": "NO_TRADE", "score": 0,
+                                           "reasons": [f"Alineación débil 1h (<{ALIGNMENT_MIN_ABS_SCORE})"]}, []
 
     best = None  # (abs_score, tf, res, ohlcv)
     for tf in TIMEFRAME_CANDIDATES:
