@@ -40,7 +40,7 @@ strategy:
 
   # NUEVO: filtro rango
   range_lookback: 20
-  min_range_pct: 0.8
+  min_range_pct: 0.008
 
   # NUEVO: RR mínimo
   min_rr: 1.3
