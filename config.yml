@@ -52,7 +52,7 @@ strategy:
   alignment_timeframes: ["15m", "1h"]
   alignment_min_abs_score: 45
 
-  signal_cooldown_min: 90
+  signal_cooldown_min: 45
   min_move_pct: 0.001
 
 learning:
