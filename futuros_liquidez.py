@@ -518,28 +518,30 @@ def choose_best_timeframe(exchange, symbol: str) -> Tuple[str, dict, List[List[f
         sa = ra.get("signal", "NO_TRADE")
         sb = rb.get("signal", "NO_TRADE")
 
+        # Si 15m NO tiene señal, devolvemos su razón real (no “alineación”)
         if sa == "NO_TRADE":
             reasons = ra.get("reasons") or ["NO_TRADE"]
             return PRIMARY_TIMEFRAME, {"signal": "NO_TRADE", "score": float(ra.get("score", 0)), "reasons": reasons}, []
 
+        # 15m tiene señal: exige score mínimo en 15m
         if abs(float(ra.get("score", 0))) < ALIGNMENT_MIN_ABS_SCORE:
             return PRIMARY_TIMEFRAME, {"signal": "NO_TRADE", "score": 0,
                                        "reasons": [f"Alineación débil 15m (<{ALIGNMENT_MIN_ABS_SCORE})"]}, []
 
-        if sb == "NO_TRADE":
-            pass
-        else:
+        # 1h neutral no bloquea
+        if sb != "NO_TRADE":
+            # 1h con señal: debe coincidir
             if sb != sa:
                 return PRIMARY_TIMEFRAME, {"signal": "NO_TRADE", "score": 0,
                                            "reasons": ["No alineación 15m↔1h (1h en contra)"]}, []
-
+            # y también cumplir score mínimo
             if abs(float(rb.get("score", 0))) < ALIGNMENT_MIN_ABS_SCORE:
                 return PRIMARY_TIMEFRAME, {"signal": "NO_TRADE", "score": 0,
                                            "reasons": [f"Alineación débil 1h (<{ALIGNMENT_MIN_ABS_SCORE})"]}, []
 
     best = None  # (abs_score, tf, res, ohlcv)
     for tf in TIMEFRAME_CANDIDATES:
-        res, ohlcv = cached.get(tf, ({"signal": "NO_TRADE", "score": 0}, []))
+        res, ohlcv = cached.get(tf, ({"signal": "NO_TRADE", "score": 0, "reasons": ["sin datos"]}, []))
         sig = res.get("signal", "NO_TRADE")
         score = float(res.get("score", 0))
         if sig == "NO_TRADE":
