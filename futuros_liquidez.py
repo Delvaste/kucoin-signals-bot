@@ -2,7 +2,6 @@
 import os
 import time
 import json
-import math
 import threading
 import signal
 from dataclasses import dataclass, asdict
@@ -95,6 +94,7 @@ BREAKOUT_CONFIRM = bool(CONFIG.get("strategy", {}).get("breakout_confirm", True)
 ALIGNMENT_ENABLED = bool(CONFIG.get("strategy", {}).get("alignment_enabled", True))
 ALIGNMENT_TFS = CONFIG.get("strategy", {}).get("alignment_timeframes", ["15m", "1h"])
 ALIGNMENT_MIN_ABS_SCORE = float(CONFIG.get("strategy", {}).get("alignment_min_abs_score", 70))
+ALIGNED_NEUTRAL = bool(CONFIG.get("strategy", {}).get("aligned_neutral", True))
 
 SIGNAL_COOLDOWN_MIN = int(CONFIG.get("strategy", {}).get("signal_cooldown_min", 45))
 MIN_MOVE_PCT = float(CONFIG.get("strategy", {}).get("min_move_pct", 0.001))  # 0.1%
@@ -221,41 +221,8 @@ def resolve_symbol(exchange, base: str) -> Optional[str]:
 def candle_ts(ohlcv: List[List[float]]) -> int:
     return int(ohlcv[-1][0])
 
-def get_tick_size(exchange, symbol: str) -> Optional[float]:
-    """Obtiene el tick size real del mercado (si está disponible)."""
-    try:
-        m = exchange.market(symbol)
-        info = m.get("info") or {}
-        for k in ("tickSize", "priceIncrement", "priceTick"):
-            v = info.get(k)
-            if v not in (None, "", "0"):
-                t = float(v)
-                if t > 0:
-                    return t
-        prec = (m.get("precision") or {}).get("price", None)
-        if prec is None:
-            return None
-        prec = int(prec)
-        if prec < 0:
-            return None
-        return 10 ** (-prec)
-    except Exception:
-        return None
-
-def quantize_price(price: float, tick: float, mode: str) -> float:
-    """Ajusta precio al tick: mode = 'down'|'up'|'nearest'."""
-    x = float(price) / float(tick)
-    if mode == "down":
-        return float((math.floor(x)) * tick)
-    if mode == "up":
-        return float((math.ceil(x)) * tick)
-    return float((round(x)) * tick)
-
 def round_price(exchange, symbol: str, price: float) -> float:
-    """Redondeo robusto al tick (fallback a decimales)."""
-    tick = get_tick_size(exchange, symbol)
-    if tick:
-        return quantize_price(float(price), tick, "nearest")
+    """Ajuste a la precisión del mercado (evita TP/SL iguales en memes)."""
     try:
         m = exchange.market(symbol)
         prec = (m.get("precision") or {}).get("price", None)
@@ -264,36 +231,6 @@ def round_price(exchange, symbol: str, price: float) -> float:
         return float(round(float(price), int(prec)))
     except Exception:
         return float(price)
-
-def normalize_levels(exchange, symbol: str, side: str, entry: float, sl: float, tp: float) -> Tuple[float, float, float]:
-    """Normaliza SL/TP al tick del mercado, con redondeo direccional y anti-colapso."""
-    entry = float(entry)
-    sl = float(sl)
-    tp = float(tp)
-
-    tick = get_tick_size(exchange, symbol)
-    if not tick or tick <= 0:
-        return entry, sl, tp
-
-    # SL/TP direccional: SL siempre peor y TP siempre mejor
-    if side == "LONG":
-        sl_q = quantize_price(sl, tick, "down")
-        tp_q = quantize_price(tp, tick, "up")
-    else:
-        sl_q = quantize_price(sl, tick, "up")
-        tp_q = quantize_price(tp, tick, "down")
-
-    sl, tp = float(sl_q), float(tp_q)
-
-    # Anti-colapso por tick
-    if tp == entry:
-        tp = entry + tick if side == "LONG" else entry - tick
-    if sl == entry:
-        sl = entry - tick if side == "LONG" else entry + tick
-    if tp == sl:
-        tp = tp + tick if side == "LONG" else tp - tick
-
-    return entry, sl, tp
 
 def clamp_levels(entry: float, sl: float, tp: float, side: str) -> Tuple[float, float]:
     """Caps por % para 10x."""
@@ -718,6 +655,7 @@ def main_loop() -> None:
     last_signal_time_by_base: Dict[str, datetime] = {}
     active_by_base: Dict[str, Signal] = {}
     sent_ids: Dict[str, bool] = {}
+    last_no_trade_log: Dict[str, float] = {}
 
     while not SHUTDOWN:
         # heartbeat cada ~60s (para ver que el loop está vivo)
@@ -763,19 +701,13 @@ def main_loop() -> None:
             if last_t and (now_local() - last_t) < timedelta(minutes=SIGNAL_COOLDOWN_MIN):
                 continue
 
-            last_no_trade_log = {}
-
             tf, res, ohlcv = choose_best_timeframe(exchange, symbol)
             sig_type = res.get("signal", "NO_TRADE")
-
             if sig_type == "NO_TRADE" or not ohlcv:
-                now = time.time()
-                key = f"{base}:{tf}"
-                if now - last_no_trade_log.get(key, 0) >= 60:
-                    rs = res.get("reasons") or []
-                    print(f"[no_trade] {base} tf={tf} reasons={rs[:6]}")
-                    last_no_trade_log[key] = now
+                if int(time.time()) % 300 == 0:  # cada ~5 min
+                    print(f"[no_trade] {base} tf={tf} reasons={(res.get('reasons') or [])[:2]}")
                 continue
+
 
             score = float(res.get("score", 0))
             entry = float(res["entry"])
@@ -793,9 +725,12 @@ def main_loop() -> None:
                 print(f"[learning] bloqueado {base} {tf} {sig_type}: {why}")
                 continue
 
-            # Caps + normalización (tick size)
+            # Caps + precision
             sl, tp = clamp_levels(entry, sl, tp, sig_type)
-            entry, sl, tp = normalize_levels(exchange, symbol, sig_type, entry, sl, tp)
+
+            entry = round_price(exchange, symbol, entry)
+            sl = round_price(exchange, symbol, sl)
+            tp = round_price(exchange, symbol, tp)
             # --- GUARD: niveles inválidos (evita ZeroDivision y señales rotas) ---
             if not np.isfinite(entry) or not np.isfinite(sl) or not np.isfinite(tp):
                 print(f"[guard] {symbol} niveles no finitos: entry={entry} sl={sl} tp={tp}")
