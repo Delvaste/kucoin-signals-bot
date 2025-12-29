@@ -221,15 +221,38 @@ def candle_ts(ohlcv: List[List[float]]) -> int:
     return int(ohlcv[-1][0])
 
 def round_price(exchange, symbol: str, price: float) -> float:
-    """Ajuste a la precisión del mercado (evita TP/SL iguales en memes)."""
+    """Ajuste a tick size / precisión real del mercado."""
     try:
         m = exchange.market(symbol)
+        info = m.get("info") or {}
+
+        # KuCoin Futures suele traer tick size por aquí (según mercado)
+        tick = None
+        for k in ("tickSize", "priceIncrement", "priceTick"):
+            if k in info and info[k] not in (None, "", "0"):
+                try:
+                    tick = float(info[k])
+                    break
+                except Exception:
+                    pass
+
+        if tick and tick > 0:
+            # redondeo al múltiplo del tick
+            return float(round(float(price) / tick) * tick)
+
+        # fallback: precisión decimal
         prec = (m.get("precision") or {}).get("price", None)
         if prec is None:
             return float(price)
+
+        # ⚠️ si prec==0 y el precio es pequeño, NO lo mates
+        if int(prec) == 0 and 0 < float(price) < 1:
+            return float(price)
+
         return float(round(float(price), int(prec)))
     except Exception:
         return float(price)
+
 
 def clamp_levels(entry: float, sl: float, tp: float, side: str) -> Tuple[float, float]:
     """Caps por % para 10x."""
@@ -743,7 +766,7 @@ def main_loop() -> None:
             # Caps + precision
             sl, tp = clamp_levels(entry, sl, tp, sig_type)
 
-            entry = round_price(exchange, symbol, entry)
+            #entry = round_price(exchange, symbol, entry)
             sl = round_price(exchange, symbol, sl)
             tp = round_price(exchange, symbol, tp)
             # --- GUARD: niveles inválidos (evita ZeroDivision y señales rotas) ---
