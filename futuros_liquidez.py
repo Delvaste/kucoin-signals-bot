@@ -655,12 +655,18 @@ def main_loop() -> None:
     last_signal_time_by_base: Dict[str, datetime] = {}
     active_by_base: Dict[str, Signal] = {}
     sent_ids: Dict[str, bool] = {}
+
+    # ✅ Persistente: no se reinicia por moneda ni por iteración
     last_no_trade_log: Dict[str, float] = {}
+    last_heartbeat_ts: float = 0.0
 
     while not SHUTDOWN:
-        # heartbeat cada ~60s (para ver que el loop está vivo)
-        if int(time.time()) % 60 == 0:
+        # ✅ heartbeat cada ~60s real (no dependas del segundo exacto)
+        now_ts = time.time()
+        if now_ts - last_heartbeat_ts >= 60.0:
             print(f"[heartbeat] {local_str(now_local())} alive")
+            last_heartbeat_ts = now_ts
+
         # 1) Revisar abiertas
         for base, sig in list(active_by_base.items()):
             if SHUTDOWN:
@@ -703,11 +709,16 @@ def main_loop() -> None:
 
             tf, res, ohlcv = choose_best_timeframe(exchange, symbol)
             sig_type = res.get("signal", "NO_TRADE")
-            if sig_type == "NO_TRADE" or not ohlcv:
-                if int(time.time()) % 300 == 0:  # cada ~5 min
-                    print(f"[no_trade] {base} tf={tf} reasons={(res.get('reasons') or [])[:2]}")
-                continue
 
+            # ✅ NO_TRADE: log máximo 1/min por base+tf
+            if sig_type == "NO_TRADE" or not ohlcv:
+                key = f"{base}:{tf}"
+                now_ts = time.time()
+                if now_ts - last_no_trade_log.get(key, 0.0) >= 60.0:
+                    rs = res.get("reasons") or []
+                    print(f"[no_trade] {base} tf={tf} reasons={rs[:6]}")
+                    last_no_trade_log[key] = now_ts
+                continue
 
             score = float(res.get("score", 0))
             entry = float(res["entry"])
@@ -731,6 +742,7 @@ def main_loop() -> None:
             entry = round_price(exchange, symbol, entry)
             sl = round_price(exchange, symbol, sl)
             tp = round_price(exchange, symbol, tp)
+
             # --- GUARD: niveles inválidos (evita ZeroDivision y señales rotas) ---
             if not np.isfinite(entry) or not np.isfinite(sl) or not np.isfinite(tp):
                 print(f"[guard] {symbol} niveles no finitos: entry={entry} sl={sl} tp={tp}")
@@ -752,7 +764,6 @@ def main_loop() -> None:
             if move_tp < MIN_MOVE_PCT or move_sl < MIN_MOVE_PCT:
                 print(f"[levels] {base} {tf}: movimientos muy pequeños TP={move_tp:.6f} SL={move_sl:.6f}. NO_TRADE")
                 continue
-
 
             last_ts = candle_ts(ohlcv)
             unique_id = f"{symbol}|{tf}|{last_ts}|{sig_type}"
