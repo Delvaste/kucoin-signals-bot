@@ -763,13 +763,19 @@ def main_loop() -> None:
             if last_t and (now_local() - last_t) < timedelta(minutes=SIGNAL_COOLDOWN_MIN):
                 continue
 
+            last_no_trade_log = {}
+
             tf, res, ohlcv = choose_best_timeframe(exchange, symbol)
             sig_type = res.get("signal", "NO_TRADE")
-            if sig_type == "NO_TRADE" or not ohlcv:
-                if int(time.time()) % 300 == 0:  # cada ~5 min
-                    print(f"[no_trade] {base} tf={tf} reasons={(res.get('reasons') or [])[:2]}")
-                continue
 
+            if sig_type == "NO_TRADE" or not ohlcv:
+                now = time.time()
+                key = f"{base}:{tf}"
+                if now - last_no_trade_log.get(key, 0) >= 60:
+                    rs = res.get("reasons") or []
+                    print(f"[no_trade] {base} tf={tf} reasons={rs[:6]}")
+                    last_no_trade_log[key] = now
+                continue
 
             score = float(res.get("score", 0))
             entry = float(res["entry"])
