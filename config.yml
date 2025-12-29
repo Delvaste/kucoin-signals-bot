@@ -20,10 +20,10 @@ markets:
     - HBAR
 
 strategy:
-  min_score_for_entry: 78
+  min_score_for_entry: 72
 
   adx_period: 14
-  min_adx: 20
+  min_adx: 18
 
   rsi_period: 14
   rsi_long_min: 52
@@ -36,14 +36,14 @@ strategy:
   max_tp_pct: 0.05
 
   atr_pct_min: 0.003
-  atr_pct_max: 0.018
+  atr_pct_max: 0.022
 
   # NUEVO: filtro rango
   range_lookback: 20
-  min_range_pct: 0.008
+  min_range_pct: 0.006
 
   # NUEVO: RR mínimo
-  min_rr: 1.3
+  min_rr: 1.25
 
   # NUEVO: confirmación breakout
   breakout_confirm: false
