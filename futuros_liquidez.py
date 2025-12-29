@@ -221,31 +221,79 @@ def resolve_symbol(exchange, base: str) -> Optional[str]:
 def candle_ts(ohlcv: List[List[float]]) -> int:
     return int(ohlcv[-1][0])
 
-def round_price(exchange, symbol: str, price: float) -> float:
+def get_tick_size(exchange, symbol: str) -> Optional[float]:
+    """Obtiene el tick size real del mercado (si está disponible)."""
     try:
         m = exchange.market(symbol)
         info = m.get("info") or {}
-
-        # Prioridad: tick size real
         for k in ("tickSize", "priceIncrement", "priceTick"):
             v = info.get(k)
             if v not in (None, "", "0"):
-                tick = float(v)
-                if tick > 0:
-                    return round(float(price) / tick) * tick
+                t = float(v)
+                if t > 0:
+                    return t
+        prec = (m.get("precision") or {}).get("price", None)
+        if prec is None:
+            return None
+        prec = int(prec)
+        if prec < 0:
+            return None
+        return 10 ** (-prec)
+    except Exception:
+        return None
 
-        # Fallback: precisión decimal
-        prec = (m.get("precision") or {}).get("price")
+def quantize_price(price: float, tick: float, mode: str) -> float:
+    """Ajusta precio al tick: mode = 'down'|'up'|'nearest'."""
+    x = float(price) / float(tick)
+    if mode == "down":
+        return float((math.floor(x)) * tick)
+    if mode == "up":
+        return float((math.ceil(x)) * tick)
+    return float((round(x)) * tick)
+
+def round_price(exchange, symbol: str, price: float) -> float:
+    """Redondeo robusto al tick (fallback a decimales)."""
+    tick = get_tick_size(exchange, symbol)
+    if tick:
+        return quantize_price(float(price), tick, "nearest")
+    try:
+        m = exchange.market(symbol)
+        prec = (m.get("precision") or {}).get("price", None)
         if prec is None:
             return float(price)
-
-        # Evitar matar precios pequeños con prec=0
-        if int(prec) == 0 and 0 < float(price) < 1:
-            return float(price)
-
-        return round(float(price), int(prec))
+        return float(round(float(price), int(prec)))
     except Exception:
         return float(price)
+
+def normalize_levels(exchange, symbol: str, side: str, entry: float, sl: float, tp: float) -> Tuple[float, float, float]:
+    """Normaliza SL/TP al tick del mercado, con redondeo direccional y anti-colapso."""
+    entry = float(entry)
+    sl = float(sl)
+    tp = float(tp)
+
+    tick = get_tick_size(exchange, symbol)
+    if not tick or tick <= 0:
+        return entry, sl, tp
+
+    # SL/TP direccional: SL siempre peor y TP siempre mejor
+    if side == "LONG":
+        sl_q = quantize_price(sl, tick, "down")
+        tp_q = quantize_price(tp, tick, "up")
+    else:
+        sl_q = quantize_price(sl, tick, "up")
+        tp_q = quantize_price(tp, tick, "down")
+
+    sl, tp = float(sl_q), float(tp_q)
+
+    # Anti-colapso por tick
+    if tp == entry:
+        tp = entry + tick if side == "LONG" else entry - tick
+    if sl == entry:
+        sl = entry - tick if side == "LONG" else entry + tick
+    if tp == sl:
+        tp = tp + tick if side == "LONG" else tp - tick
+
+    return entry, sl, tp
 
 def clamp_levels(entry: float, sl: float, tp: float, side: str) -> Tuple[float, float]:
     """Caps por % para 10x."""
@@ -528,44 +576,31 @@ def choose_best_timeframe(exchange, symbol: str) -> Tuple[str, dict, List[List[f
 
     if ALIGNMENT_ENABLED:
         tf_a, tf_b = ALIGNMENT_TFS[0], ALIGNMENT_TFS[1]
-        ra, _ = cached.get(tf_a, ({"signal": "NO_TRADE", "score": 0, "reasons": ["sin datos"]}, []))
-        rb, _ = cached.get(tf_b, ({"signal": "NO_TRADE", "score": 0, "reasons": ["sin datos"]}, []))
+        ra, _ = cached.get(tf_a, ({"signal": "NO_TRADE", "score": 0}, []))
+        rb, _ = cached.get(tf_b, ({"signal": "NO_TRADE", "score": 0}, []))
 
-        sa = ra.get("signal", "NO_TRADE")
-        sb = rb.get("signal", "NO_TRADE")
+        if not aligned_direction(ra, rb):
+            return PRIMARY_TIMEFRAME, {"signal": "NO_TRADE", "score": 0, "reasons": ["No alineación 15m↔1h"]}, []
 
-        # Si 15m NO tiene señal, devolvemos la razón real (no “alineación”)
-        if sa == "NO_TRADE":
-            reasons = ra.get("reasons") or ["NO_TRADE"]
-            return PRIMARY_TIMEFRAME, {"signal": "NO_TRADE", "score": float(ra.get("score", 0)), "reasons": reasons}, []
+        if abs(float(ra.get("score", 0))) < ALIGNMENT_MIN_ABS_SCORE or abs(float(rb.get("score", 0))) < ALIGNMENT_MIN_ABS_SCORE:
+            return PRIMARY_TIMEFRAME, {"signal": "NO_TRADE", "score": 0, "reasons": [f"Alineación débil (<{ALIGNMENT_MIN_ABS_SCORE})"]}, []
 
-        # 15m tiene señal: exige score mínimo en 15m
-        if abs(float(ra.get("score", 0))) < ALIGNMENT_MIN_ABS_SCORE:
-            return PRIMARY_TIMEFRAME, {"signal": "NO_TRADE", "score": 0,
-                                       "reasons": [f"Alineación débil 15m (<{ALIGNMENT_MIN_ABS_SCORE})"]}, []
-
-        # 1h neutral no bloquea
-        if sb != "NO_TRADE":
-            # 1h con señal: debe coincidir
-            if sb != sa:
-                return PRIMARY_TIMEFRAME, {"signal": "NO_TRADE", "score": 0,
-                                           "reasons": ["No alineación 15m↔1h (1h en contra)"]}, []
-            # y también cumplir score mínimo
-            if abs(float(rb.get("score", 0))) < ALIGNMENT_MIN_ABS_SCORE:
-                return PRIMARY_TIMEFRAME, {"signal": "NO_TRADE", "score": 0,
-                                           "reasons": [f"Alineación débil 1h (<{ALIGNMENT_MIN_ABS_SCORE})"]}, []
-
-    best = None
+    best = None  # (abs_score, tf, res, ohlcv)
     for tf in TIMEFRAME_CANDIDATES:
-        res, ohlcv = cached.get(tf, ({"signal": "NO_TRADE", "score": 0, "reasons": ["sin datos"]}, []))
+        res, ohlcv = cached.get(tf, ({"signal": "NO_TRADE", "score": 0}, []))
         sig = res.get("signal", "NO_TRADE")
         score = float(res.get("score", 0))
         if sig == "NO_TRADE":
             continue
 
         cand = (abs(score), tf, res, ohlcv)
-        if best is None or cand[0] > best[0] + 1e-9 or (abs(cand[0] - best[0]) <= 1e-9 and best[1] != PRIMARY_TIMEFRAME and tf == PRIMARY_TIMEFRAME):
+        if best is None:
             best = cand
+        else:
+            if cand[0] > best[0] + 1e-9:
+                best = cand
+            elif abs(cand[0] - best[0]) <= 1e-9 and best[1] != PRIMARY_TIMEFRAME and tf == PRIMARY_TIMEFRAME:
+                best = cand
 
     if best is None:
         return PRIMARY_TIMEFRAME, {"signal": "NO_TRADE", "score": 0, "reasons": ["NO_TRADE"]}, []
@@ -671,10 +706,6 @@ def check_signal_outcome(exchange, sig: Signal) -> Optional[str]:
 # =======================
 def main_loop() -> None:
     print("[bot] Iniciado (Alta Precisión + Autoaprendizaje + Filtros extra)")
-    print("[BUILD] aligned_neutral=ON v=2025-12-28-01", flush=True)
-    print(f"[CFG] MIN_SCORE={MIN_SCORE} MIN_ADX={MIN_ADX} RSI_L={RSI_LONG_MIN} RSI_S={RSI_SHORT_MAX} "
-          f"ALIGN_MIN={ALIGNMENT_MIN_ABS_SCORE} BREAKOUT={BREAKOUT_CONFIRM} COOLDOWN={SIGNAL_COOLDOWN_MIN}", flush=True)
-
 
     exchange = ccxt.kucoinfutures({
         "apiKey": KUCOIN_API_KEY,
@@ -756,10 +787,8 @@ def main_loop() -> None:
                 print(f"[learning] bloqueado {base} {tf} {sig_type}: {why}")
                 continue
 
-            # Caps por %
+            # Caps + normalización (tick size)
             sl, tp = clamp_levels(entry, sl, tp, sig_type)
-
-            # Normalización robusta por tick + redondeo direccional
             entry, sl, tp = normalize_levels(exchange, symbol, sig_type, entry, sl, tp)
             # --- GUARD: niveles inválidos (evita ZeroDivision y señales rotas) ---
             if not np.isfinite(entry) or not np.isfinite(sl) or not np.isfinite(tp):
