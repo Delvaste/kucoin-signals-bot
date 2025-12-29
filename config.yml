@@ -21,7 +21,7 @@ markets:
 
 strategy:
   min_score_for_entry: 70
-
+  aligned_neutral: true
   adx_period: 14
   min_adx: 18
 
