@@ -2,6 +2,7 @@
 import os
 import time
 import json
+import math
 import threading
 import signal
 from dataclasses import dataclass, asdict
@@ -755,12 +756,11 @@ def main_loop() -> None:
                 print(f"[learning] bloqueado {base} {tf} {sig_type}: {why}")
                 continue
 
-            # Caps + precision
+            # Caps por %
             sl, tp = clamp_levels(entry, sl, tp, sig_type)
 
-            #entry = round_price(exchange, symbol, entry)
-            sl = round_price(exchange, symbol, sl)
-            tp = round_price(exchange, symbol, tp)
+            # Normalización robusta por tick + redondeo direccional
+            entry, sl, tp = normalize_levels(exchange, symbol, sig_type, entry, sl, tp)
             # --- GUARD: niveles inválidos (evita ZeroDivision y señales rotas) ---
             if not np.isfinite(entry) or not np.isfinite(sl) or not np.isfinite(tp):
                 print(f"[guard] {symbol} niveles no finitos: entry={entry} sl={sl} tp={tp}")
