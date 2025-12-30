@@ -519,8 +519,11 @@ def choose_best_timeframe(exchange, symbol: str) -> Tuple[str, dict, List[List[f
         if not aligned_direction(ra, rb):
             return PRIMARY_TIMEFRAME, {"signal": "NO_TRADE", "score": 0, "reasons": ["No alineación 15m↔1h"]}, []
 
-        if abs(float(ra.get("score", 0))) < ALIGNMENT_MIN_ABS_SCORE or abs(float(rb.get("score", 0))) < ALIGNMENT_MIN_ABS_SCORE:
-            return PRIMARY_TIMEFRAME, {"signal": "NO_TRADE", "score": 0, "reasons": [f"Alineación débil (<{ALIGNMENT_MIN_ABS_SCORE})"]}, []
+#        if abs(float(ra.get("score", 0))) < ALIGNMENT_MIN_ABS_SCORE or abs(float(rb.get("score", 0))) < ALIGNMENT_MIN_ABS_SCORE:
+#            return PRIMARY_TIMEFRAME, {"signal": "NO_TRADE", "score": 0, "reasons": [f"Alineación débil (<{ALIGNMENT_MIN_ABS_SCORE})"]}, []
+        if abs(float(ra.get("score", 0))) < ALIGNMENT_MIN_ABS_SCORE:
+            return PRIMARY_TIMEFRAME, {"signal":"NO_TRADE","score":0,
+                                       "reasons":[f"Alineación débil 15m (<{ALIGNMENT_MIN_ABS_SCORE})"]}, []
 
     best = None  # (abs_score, tf, res, ohlcv)
     for tf in TIMEFRAME_CANDIDATES:
